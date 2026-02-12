@@ -113,6 +113,10 @@ export default function App() {
       )}
 
       {(dataH() || dataQ()) && <HydroChart dataH={dataH()} dataQ={dataQ()} />}
+
+      <p style={{ "text-align": "center", "font-size": "12px", color: "#999", "margin-top": "2rem" }}>
+        v{import.meta.env.VITE_APP_VERSION || "dev"}
+      </p>
     </div>
   );
 }
