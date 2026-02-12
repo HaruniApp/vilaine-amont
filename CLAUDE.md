@@ -45,6 +45,14 @@ sudo ln -s /etc/nginx/sites-available/vigicrue /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+## CD
+
+Push sur `main` → GitHub Actions déploie automatiquement sur haruni via SSH (`appleboy/ssh-action`).
+
+Secrets GitHub à configurer (`Settings > Secrets and variables > Actions`) :
+- `SSH_HOST` : IP ou hostname du serveur
+- `SSH_KEY` : clé privée SSH pour l'user `sb`
+
 ## Architecture
 
 Monorepo avec deux sous-projets indépendants (chacun a son propre `package.json`) :

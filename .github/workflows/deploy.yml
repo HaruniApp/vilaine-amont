@@ -1,0 +1,23 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: sb
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd /opt/vigicrue
+            git pull origin main
+            npm -C backend install --production
+            npm -C frontend install
+            npm -C frontend run build
+            pm2 restart vigicrue-api
