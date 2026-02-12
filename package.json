@@ -1,0 +1,7 @@
+{
+  "name": "vigicrue",
+  "private": true,
+  "scripts": {
+    "dev": "npx concurrently -n back,front \"npm -C backend run dev\" \"npm -C frontend run dev\""
+  }
+}
