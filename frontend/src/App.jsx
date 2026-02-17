@@ -1,6 +1,7 @@
 import { createSignal, For } from 'solid-js';
 import 'uplot/dist/uPlot.min.css';
 import HydroChart from './HydroChart';
+import networkSvg from './assets/network.svg';
 
 function formatDate(date) {
   const d = date.getDate().toString().padStart(2, '0');
@@ -198,6 +199,37 @@ export default function App() {
       )}
 
       {(dataH() || dataQ()) && <HydroChart dataH={dataH()} dataQ={dataQ()} />}
+
+      <details style={{
+        "margin-top": "1.5rem",
+        background: "#f5f5f7",
+        "border-radius": "14px",
+        overflow: "hidden",
+      }}>
+        <summary style={{
+          padding: "0.75rem 1.25rem",
+          cursor: "pointer",
+          "font-size": "13px",
+          "font-weight": "600",
+          color: "#6e6e73",
+          "letter-spacing": "0.3px",
+          "list-style": "none",
+          display: "flex",
+          "align-items": "center",
+          gap: "0.5rem",
+          "user-select": "none",
+        }}>
+          <span style={{
+            display: "inline-block",
+            transition: "transform 0.2s ease",
+            "font-size": "10px",
+          }} class="details-arrow">&#9654;</span>
+          Réseau hydrographique — Vilaine Amont
+        </summary>
+        <div style={{ padding: "0 1rem 1rem" }}>
+          <img src={networkSvg} alt="Réseau hydrographique du bassin Vilaine Amont" style={{ width: "100%" }} />
+        </div>
+      </details>
 
       <p style={{
         "text-align": "center",

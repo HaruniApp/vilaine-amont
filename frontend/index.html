@@ -8,6 +8,8 @@
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       body { margin: 0; background: #fafafa; color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+      details summary::-webkit-details-marker { display: none; }
+      details[open] .details-arrow { transform: rotate(90deg); }
     </style>
   </head>
   <body>
