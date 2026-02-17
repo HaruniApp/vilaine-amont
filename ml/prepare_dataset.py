@@ -253,17 +253,6 @@ def main():
     print("2/6 — Interpolation des trous...")
     df = interpolate_gaps(df)
 
-    # 2b. Log-transform des colonnes H et Q (avant dérivées)
-    # log1p étale les hautes valeurs, réduisant le biais en crue
-    log_cols = []
-    for code in STATION_CODES:
-        for suffix in ["_h", "_q"]:
-            col = f"{code}{suffix}"
-            if col in df.columns:
-                df[col] = np.log1p(df[col].clip(lower=0))
-                log_cols.append(col)
-    print(f"    Log-transform (log1p) sur {len(log_cols)} colonnes H/Q")
-
     # 3. Features dérivées
     print("3/6 — Création des features dérivées...")
     df = add_derived_features(df)
@@ -316,7 +305,7 @@ def main():
         "forecast_horizons": FORECAST_HORIZONS,
         "n_features": X.shape[2],
         "feature_names": feature_cols,
-        "log_transform_cols": log_cols,
+        "log_transform_cols": [],
         "train_end": TRAIN_END,
         "val_end": VAL_END,
         "shapes": {
