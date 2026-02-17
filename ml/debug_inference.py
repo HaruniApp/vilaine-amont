@@ -101,9 +101,9 @@ def main():
     print("=" * 60)
 
     all_preds = []
-    for i in range(0, len(X_test), 64):
-        batch = X_test[i:i+64].astype(np.float32)
-        out = session.run(None, {"input": batch})
+    for i in range(len(X_test)):
+        single = X_test[i:i+1].astype(np.float32)
+        out = session.run(None, {"input": single})
         all_preds.append(out[0])
     all_preds = np.concatenate(all_preds)
 
