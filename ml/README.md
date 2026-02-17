@@ -38,11 +38,22 @@ python collect_meteo.py
 
 Les CSV sont stockés dans `data/raw/` (gitignored).
 
-Options utiles :
-- `--start 2010-01-01 --end 2025-02-01` pour ajuster la plage
-- `--station J706062001` pour ne collecter qu'une station (hydro uniquement)
+Les scripts sont **incrémentaux** : relancer ne récupère que les nouvelles données depuis le dernier timestamp collecté. La date de fin est automatiquement aujourd'hui.
 
-### 2. Préparation du dataset
+Options utiles :
+- `--start 2010-01-01` pour ajuster la date de début
+- `--station J706062001` pour ne collecter qu'une station (hydro uniquement)
+- `--full` pour forcer une collecte complète (ignore les CSV existants)
+
+### 2. Validation des données
+
+```bash
+python validate_data.py
+```
+
+Vérifie pour chaque station : fichiers présents, plage temporelle, taux de couverture horaire, trous > 24h, statistiques min/max/moyenne.
+
+### 3. Préparation du dataset
 
 ```bash
 python prepare_dataset.py
@@ -61,7 +72,7 @@ Options :
 
 Les fichiers `.npy` et métadonnées sont dans `data/processed/`.
 
-### 3. Entraînement — Baseline XGBoost
+### 4. Entraînement — Baseline XGBoost
 
 ```bash
 python train_xgboost.py
@@ -69,7 +80,7 @@ python train_xgboost.py
 
 Rapide (quelques minutes), sert de référence. Un modèle par horizon de prédiction.
 
-### 4. Entraînement — LSTM
+### 5. Entraînement — LSTM
 
 ```bash
 python train_lstm.py
@@ -79,7 +90,7 @@ LSTM 2 couches (128→64) avec early stopping. Utilise automatiquement le GPU.
 
 Options : `--epochs 200 --hidden1 256 --hidden2 128 --lr 0.0005`
 
-### 5. Entraînement — TFT (LSTM + Attention)
+### 6. Entraînement — TFT (LSTM + Attention)
 
 ```bash
 python train_tft.py
@@ -89,7 +100,7 @@ LSTM + Multi-Head Self-Attention. Plus lent mais capture mieux les dépendances 
 
 Options : `--epochs 100 --hidden 64 --attention-heads 4`
 
-### 6. Évaluation comparative
+### 7. Évaluation comparative
 
 ```bash
 python evaluate.py
@@ -97,7 +108,7 @@ python evaluate.py
 
 Compare les 3 modèles (NSE, RMSE, MAE) et génère un graphique `models/checkpoints/comparison.png`.
 
-### 7. Export ONNX
+### 8. Export ONNX
 
 ```bash
 python export_onnx.py
@@ -114,6 +125,7 @@ ml/
 ├── config.py              # stations, coordonnées, paramètres
 ├── collect_hydro.py       # collecte H+Q (Hydro EauFrance)
 ├── collect_meteo.py       # collecte précipitations (Open-Meteo)
+├── validate_data.py       # validation des données brutes
 ├── prepare_dataset.py     # nettoyage, features, fenêtrage
 ├── train_xgboost.py       # baseline XGBoost
 ├── train_lstm.py          # modèle LSTM
