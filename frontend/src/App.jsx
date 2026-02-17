@@ -20,14 +20,17 @@ function defaultDates() {
 }
 
 const STATIONS = [
-  { id: 'J709063002', label: 'Cesson-Sevigne - Pont Briand - (Vilaine)' },
-  { id: 'J706062001', label: 'Chateaubourg - Bel Air - (Vilaine)' },
-  { id: 'J705302001', label: 'Poce-les-Bois - barrage Villaumur - (Cantache)' },
-  { id: 'J701061001', label: 'Vitre - Bas Pont - (Vilaine)' },
-  { id: 'J704301001', label: 'Taillis - La Basse Moliere - (Cantache)' },
-  { id: 'J702402001', label: 'Vitre - Le Chateau des Rochers - aval retenue Valiere - (Valiere)' },
+  { id: 'J700061001', label: 'Bourgon - Pont D 106 - (Vilaine)' },
   { id: 'J701064001', label: 'La Chapelle-Erbree - barrage Vilaine - (Vilaine)' },
   { id: 'J702401001', label: 'Erbree - Les Ravenieres - (Valiere)' },
+  { id: 'J702403001', label: 'Erbree - retenue Valiere - (Valiere)' },
+  { id: 'J702402001', label: 'Vitre - Chateau des Rochers - aval retenue - (Valiere)' },
+  { id: 'J701061001', label: 'Vitre - Bas Pont - (Vilaine)' },
+  { id: 'J704301001', label: 'Taillis - La Basse Moliere - (Cantache)' },
+  { id: 'J705302001', label: 'Poce-les-Bois - barrage Villaumur - (Cantache)' },
+  { id: 'J706062001', label: 'Chateaubourg - Bel Air - (Vilaine)' },
+  { id: 'J708311001', label: 'La Bouexiere - Le Drugeon - (Veuvre/Chevre)' },
+  { id: 'J709063002', label: 'Cesson-Sevigne - Pont Briand - (Vilaine)' },
 ];
 
 const fontFamily = '"Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
