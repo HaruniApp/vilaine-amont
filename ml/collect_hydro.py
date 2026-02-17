@@ -75,15 +75,20 @@ def fetch_series(station_id: str, start: str, end: str, variable: str) -> list[d
                 return []
 
 
+def to_hydro_date(d: datetime) -> str:
+    """Convertit en format dd/MM/yyyy attendu par l'API Hydro EauFrance."""
+    return d.strftime("%d/%m/%Y")
+
+
 def generate_yearly_ranges(start_date: str, end_date: str) -> list[tuple[str, str]]:
-    """Découpe une plage de dates en segments d'environ 1 an."""
+    """Découpe une plage de dates en segments d'environ 1 an (format dd/MM/yyyy)."""
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     ranges = []
     current = start
     while current < end:
         chunk_end = min(current + timedelta(days=365), end)
-        ranges.append((current.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+        ranges.append((to_hydro_date(current), to_hydro_date(chunk_end)))
         current = chunk_end
     return ranges
 
