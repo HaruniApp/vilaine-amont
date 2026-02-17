@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--hidden", type=int, default=256, help="Hidden size du TFT")
     parser.add_argument("--attention-heads", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=PATIENCE)
     args = parser.parse_args()
