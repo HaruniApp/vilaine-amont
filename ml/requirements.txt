@@ -7,6 +7,7 @@ pandas>=2.1.0
 scikit-learn>=1.4.0
 xgboost>=2.0.0
 onnx>=1.15.0
+onnxscript>=0.1.0
 onnxruntime>=1.17.0
 requests>=2.31.0
 tqdm>=4.66.0
