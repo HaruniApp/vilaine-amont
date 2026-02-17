@@ -1,6 +1,9 @@
-torch>=2.2.0
+--index-url https://download.pytorch.org/whl/cu130
+torch==2.9.1+cu130
+numpy
+
+--extra-index-url https://pypi.org/simple/
 pandas>=2.1.0
-numpy>=1.26.0
 scikit-learn>=1.4.0
 xgboost>=2.0.0
 onnx>=1.15.0
