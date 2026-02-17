@@ -54,6 +54,9 @@ def load_raw_data() -> pd.DataFrame:
         precip_path = RAW_DIR / f"{code}_precip.csv"
         if precip_path.exists():
             df = pd.read_csv(precip_path, parse_dates=["timestamp"])
+            # Open-Meteo retourne des timestamps tz-aware, on les convertit en tz-naive
+            if df["timestamp"].dt.tz is not None:
+                df["timestamp"] = df["timestamp"].dt.tz_localize(None)
             station_data[(code, "precip")] = df
             all_timestamps.update(df["timestamp"].dt.floor("h"))
 
