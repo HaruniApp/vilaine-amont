@@ -48,6 +48,8 @@ def load_raw_data() -> pd.DataFrame:
             path = RAW_DIR / f"{code}_{var}.csv"
             if path.exists():
                 df = pd.read_csv(path, parse_dates=["timestamp"])
+                if df["timestamp"].dt.tz is not None:
+                    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
                 station_data[(code, var)] = df
                 all_timestamps.update(df["timestamp"].dt.floor("h"))
 
