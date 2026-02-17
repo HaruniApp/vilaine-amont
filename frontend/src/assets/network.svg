@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" font-family="Inter, -apple-system, sans-serif">
   <defs>
-    <marker id="arrow" viewBox="0 0 10 6" refX="0" refY="3" markerWidth="8" markerHeight="5" orient="auto">
-      <path d="M10,0 L0,3 L10,6" fill="#0d9488" opacity="0.6"/>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="5" orient="auto">
+      <path d="M0,0 L10,3 L0,6" fill="#0d9488" opacity="0.6"/>
     </marker>
     <marker id="arrow-val" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="5" orient="auto">
       <path d="M0,0 L10,3 L0,6" fill="#2563eb" opacity="0.6"/>
