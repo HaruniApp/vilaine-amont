@@ -399,8 +399,16 @@ export async function forecast(stationId) {
 
   const targetIsLog = logTransformCols.has(`${meta.target_station}_h`);
 
+  // H normalisé au dernier timestep (pour delta denorm)
+  const lastHNorm = tensorData[(inputWindow - 1) * meta.n_features + targetHIdx];
+
   const forecasts = meta.forecast_horizons.map((h, i) => {
-    let rawMm = predictions[i] * (targetMax - targetMin) + targetMin;
+    let rawMm;
+    if (meta.target_mode === 'delta') {
+      rawMm = (lastHNorm + predictions[i]) * (targetMax - targetMin) + targetMin;
+    } else {
+      rawMm = predictions[i] * (targetMax - targetMin) + targetMin;
+    }
     // If target was log-transformed, undo: expm1(log-space value) → mm
     if (targetIsLog) rawMm = Math.expm1(rawMm);
     const meters = rawMm / 1000;

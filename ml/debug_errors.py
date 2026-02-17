@@ -32,6 +32,7 @@ def main():
     t_range = t_max - t_min
     log_cols = set(meta.get("log_transform_cols", []))
     target_is_log = target_col in log_cols
+    target_mode = meta.get("target_mode", "absolute")
 
     def denorm_to_mm(normalized):
         """Dénormalise: min-max inverse, puis expm1 si log-transform."""
@@ -54,11 +55,15 @@ def main():
 
     # Errors in mm for each horizon
     print("=" * 70)
-    print("Distribution des erreurs par horizon (mm)")
+    print(f"Distribution des erreurs par horizon (mm) [target_mode={target_mode}]")
     print("=" * 70)
     for i, h in enumerate(FORECAST_HORIZONS):
-        pred_mm = denorm_to_mm(all_preds[:, i])
-        true_mm = denorm_to_mm(y_test[:, i])
+        if target_mode == "delta":
+            pred_mm = denorm_to_mm(all_preds[:, i] + h_last_norm)
+            true_mm = denorm_to_mm(y_test[:, i] + h_last_norm)
+        else:
+            pred_mm = denorm_to_mm(all_preds[:, i])
+            true_mm = denorm_to_mm(y_test[:, i])
         err_mm = pred_mm - true_mm
         abs_err = np.abs(err_mm)
         print(f"\n  t+{h}h:")
@@ -75,8 +80,12 @@ def main():
     print("Erreur t+1h par niveau d'eau actuel")
     print("=" * 70)
 
-    pred_t1_mm = denorm_to_mm(all_preds[:, 0])
-    true_t1_mm = denorm_to_mm(y_test[:, 0])
+    if target_mode == "delta":
+        pred_t1_mm = denorm_to_mm(all_preds[:, 0] + h_last_norm)
+        true_t1_mm = denorm_to_mm(y_test[:, 0] + h_last_norm)
+    else:
+        pred_t1_mm = denorm_to_mm(all_preds[:, 0])
+        true_t1_mm = denorm_to_mm(y_test[:, 0])
     err_t1_mm = pred_t1_mm - true_t1_mm
 
     # Bins par niveau H actuel
@@ -105,8 +114,12 @@ def main():
 
     if n_crue > 0:
         for i, h in enumerate(FORECAST_HORIZONS):
-            pred = denorm_to_mm(all_preds[mask_crue, i])
-            true = denorm_to_mm(y_test[mask_crue, i])
+            if target_mode == "delta":
+                pred = denorm_to_mm(all_preds[mask_crue, i] + h_last_norm[mask_crue])
+                true = denorm_to_mm(y_test[mask_crue, i] + h_last_norm[mask_crue])
+            else:
+                pred = denorm_to_mm(all_preds[mask_crue, i])
+                true = denorm_to_mm(y_test[mask_crue, i])
             err = pred - true
             print(f"\n  t+{h}h (N={n_crue}):")
             print(f"    Biais moyen : {np.mean(err):+.1f} mm")

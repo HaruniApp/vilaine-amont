@@ -112,6 +112,7 @@ def export_to_onnx(model: torch.nn.Module, config: dict, model_name: str) -> str
         "forecast_horizons": meta["forecast_horizons"],
         "target_station": meta["target_station"],
         "feature_names": meta["feature_names"],
+        "target_mode": meta.get("target_mode", "absolute"),
         "log_transform_cols": meta.get("log_transform_cols", []),
         "propagation_hours": {k: v for k, v in PROPAGATION_HOURS.items()},
         "river_branches": RIVER_BRANCHES,

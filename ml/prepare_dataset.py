@@ -247,8 +247,10 @@ def create_windows(
 
     for i in tqdm(range(n_samples), desc="Fenêtrage", leave=False):
         X[i] = data[i : i + input_window]
+        h_current = data[i + input_window - 1, target_idx]  # dernier pas de la fenêtre
         for j, h in enumerate(horizons):
-            y[i, j] = data[i + input_window + h - 1, target_idx]
+            # Delta target : y = H_futur_norm - H_actuel_norm
+            y[i, j] = data[i + input_window + h - 1, target_idx] - h_current
         ts[i] = timestamps[i + input_window - 1]
 
     # Remplacer les NaN restants par 0
@@ -364,6 +366,7 @@ def main():
         "forecast_horizons": FORECAST_HORIZONS,
         "n_features": X.shape[2],
         "feature_names": feature_cols,
+        "target_mode": "delta",
         "log_transform_cols": [],
         "train_end": TRAIN_END,
         "val_end": VAL_END,

@@ -30,9 +30,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 def main():
     parser = argparse.ArgumentParser(description="Entraînement TFT")
     parser.add_argument("--epochs", type=int, default=EPOCHS)
-    parser.add_argument("--hidden", type=int, default=128, help="Hidden size du TFT")
+    parser.add_argument("--hidden", type=int, default=256, help="Hidden size du TFT")
     parser.add_argument("--attention-heads", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=LEARNING_RATE)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=PATIENCE)
     args = parser.parse_args()
@@ -209,26 +209,47 @@ def main():
 
     results = {"model": "TFT", "val": {}, "test": {}}
 
-    for split_name, loader in [("Val", val_loader), ("Test", test_loader)]:
-        all_preds, all_targets = [], []
+    target_mode = meta.get("target_mode", "absolute")
+
+    for split_name, loader, X_split in [("Val", val_loader, X_val), ("Test", test_loader, X_test)]:
+        all_preds, all_targets, all_h_last = [], [], []
+        offset = 0
         with torch.no_grad():
             for X_b, y_b in loader:
                 all_preds.append(model(X_b.to(device)).cpu().numpy())
                 all_targets.append(y_b.numpy())
+                bs = X_b.shape[0]
+                all_h_last.append(X_split[offset:offset + bs, -1, target_idx].numpy())
+                offset += bs
 
         y_pred = np.concatenate(all_preds)
         y_true = np.concatenate(all_targets)
+        h_last = np.concatenate(all_h_last)
 
         split_key = "val" if split_name == "Val" else "test"
         print(f"\n{split_name}:")
-        for i, h in enumerate(FORECAST_HORIZONS):
-            rmse = float(np.sqrt(np.mean((y_true[:, i] - y_pred[:, i]) ** 2)))
-            mae = float(np.mean(np.abs(y_true[:, i] - y_pred[:, i])))
-            ss_res = np.sum((y_true[:, i] - y_pred[:, i]) ** 2)
-            ss_tot = np.sum((y_true[:, i] - np.mean(y_true[:, i])) ** 2)
-            nse = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
-            results[split_key][f"t+{h}h"] = {"rmse": rmse, "mae": mae, "nse": nse}
-            print(f"  t+{h}h: NSE={nse:.4f}, RMSE={rmse:.6f}, MAE={mae:.6f}")
+
+        if target_mode == "delta":
+            # Convert delta predictions to absolute mm for meaningful metrics
+            for i, h in enumerate(FORECAST_HORIZONS):
+                pred_abs_mm = (h_last + y_pred[:, i]) * t_range + t_min
+                true_abs_mm = (h_last + y_true[:, i]) * t_range + t_min
+                rmse = float(np.sqrt(np.mean((true_abs_mm - pred_abs_mm) ** 2)))
+                mae = float(np.mean(np.abs(true_abs_mm - pred_abs_mm)))
+                ss_res = np.sum((true_abs_mm - pred_abs_mm) ** 2)
+                ss_tot = np.sum((true_abs_mm - np.mean(true_abs_mm)) ** 2)
+                nse = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
+                results[split_key][f"t+{h}h"] = {"rmse_mm": rmse, "mae_mm": mae, "nse": nse}
+                print(f"  t+{h}h: NSE={nse:.4f}, RMSE={rmse:.1f}mm, MAE={mae:.1f}mm")
+        else:
+            for i, h in enumerate(FORECAST_HORIZONS):
+                rmse = float(np.sqrt(np.mean((y_true[:, i] - y_pred[:, i]) ** 2)))
+                mae = float(np.mean(np.abs(y_true[:, i] - y_pred[:, i])))
+                ss_res = np.sum((y_true[:, i] - y_pred[:, i]) ** 2)
+                ss_tot = np.sum((y_true[:, i] - np.mean(y_true[:, i])) ** 2)
+                nse = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
+                results[split_key][f"t+{h}h"] = {"rmse": rmse, "mae": mae, "nse": nse}
+                print(f"  t+{h}h: NSE={nse:.4f}, RMSE={rmse:.6f}, MAE={mae:.6f}")
 
     # Sauvegarder les résultats
     with open(CHECKPOINTS_DIR / "tft_results.json", "w") as f:
