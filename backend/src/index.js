@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { forecast } from './forecast.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -39,6 +40,19 @@ app.get('/api/station/:stationId/series', async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('Proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/station/:stationId/forecast', async (req, res) => {
+  try {
+    const result = await forecast(req.params.stationId);
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'MODEL_NOT_FOUND') {
+      return res.json({ error: 'model_not_found', forecasts: [] });
+    }
+    console.error('Forecast error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

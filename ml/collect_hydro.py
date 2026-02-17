@@ -27,6 +27,7 @@ from config import (
     HYDRO_BASE_URL,
     RAW_DIR,
     STATIONS,
+    STATIONS_NO_Q,
 )
 
 HEADERS = {
@@ -119,7 +120,7 @@ def collect_station(station: dict, start_date: str, end_date: str, full: bool = 
     print(f"Station: {label} ({code})")
     print(f"{'='*60}")
 
-    variables = ["H"] if station.get("barrage") else ["H", "Q"]
+    variables = ["H"] if code in STATIONS_NO_Q else ["H", "Q"]
 
     for variable in variables:
         out_path = RAW_DIR / f"{code}_{variable.lower()}.csv"

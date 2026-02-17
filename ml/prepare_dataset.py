@@ -28,6 +28,7 @@ from config import (
     RAW_DIR,
     STATION_CODES,
     STATIONS,
+    STATIONS_NO_Q,
     TARGET_STATION,
     TRAIN_END,
     VAL_END,
@@ -109,6 +110,15 @@ def interpolate_gaps(df: pd.DataFrame, max_gap_hours: int = 6) -> pd.DataFrame:
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         df[col] = df[col].interpolate(method="linear", limit=max_gap_hours)
+    return df
+
+
+def drop_no_q_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Supprime les colonnes Q des stations sans données de débit."""
+    cols_to_drop = [f"{code}_q" for code in STATIONS_NO_Q if f"{code}_q" in df.columns]
+    if cols_to_drop:
+        print(f"    Suppression colonnes Q sans données : {cols_to_drop}")
+        df = df.drop(columns=cols_to_drop)
     return df
 
 
@@ -236,6 +246,9 @@ def main():
     df = load_raw_data()
     print(f"    {len(df)} lignes, {len(df.columns)} colonnes")
 
+    # 1b. Suppression des colonnes Q inutiles
+    df = drop_no_q_columns(df)
+
     # 2. Interpolation
     print("2/6 — Interpolation des trous...")
     df = interpolate_gaps(df)
@@ -251,10 +264,16 @@ def main():
     print("4/6 — Normalisation min-max...")
     df, norm_params = normalize_features(df)
 
-    # Sauvegarder les paramètres de normalisation
+    # Sauvegarder les paramètres de normalisation (NaN → null pour JSON valide)
     norm_path = PROCESSED_DIR / "norm_params.json"
+    clean_params = {}
+    for k, v in norm_params.items():
+        clean_params[k] = {
+            "min": None if np.isnan(v["min"]) else v["min"],
+            "max": None if np.isnan(v["max"]) else v["max"],
+        }
     with open(norm_path, "w") as f:
-        json.dump(norm_params, f, indent=2)
+        json.dump(clean_params, f, indent=2)
     print(f"    Paramètres → {norm_path.name}")
 
     # Sauvegarder les noms de features

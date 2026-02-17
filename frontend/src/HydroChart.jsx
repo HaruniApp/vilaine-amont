@@ -99,7 +99,7 @@ function createThresholdsPlugin(getThresholds) {
   };
 }
 
-function buildData(dataH, dataQ) {
+function buildData(dataH, dataQ, forecast) {
   const pointsH = extractPoints(dataH);
   const pointsQ = extractPoints(dataQ);
   const timestamps = [];
@@ -134,13 +134,34 @@ function buildData(dataH, dataQ) {
     }
   }
 
-  return [timestamps, valuesH, valuesQ];
+  // Build forecast series
+  const valuesForecast = new Array(timestamps.length).fill(null);
+
+  if (forecast?.forecasts?.length && timestamps.length > 0) {
+    // Start with the last observed H value for visual continuity
+    const lastHVal = valuesH[valuesH.length - 1];
+    const lastHTs = timestamps[timestamps.length - 1];
+    if (lastHVal != null) {
+      valuesForecast[valuesForecast.length - 1] = lastHVal;
+    }
+
+    // Add forecast points at future timestamps
+    for (const f of forecast.forecasts) {
+      const ts = Math.floor(new Date(f.t).getTime() / 1000);
+      timestamps.push(ts);
+      valuesH.push(null);
+      valuesQ.push(null);
+      valuesForecast.push(f.v);
+    }
+  }
+
+  return [timestamps, valuesH, valuesQ, valuesForecast];
 }
 
 export default function HydroChart(props) {
   const bus = createPluginBus();
 
-  const chartData = createMemo(() => buildData(props.dataH, props.dataQ));
+  const chartData = createMemo(() => buildData(props.dataH, props.dataQ, props.forecast));
 
   const thresholds = createMemo(() => extractThresholds(props.dataH));
 
@@ -170,6 +191,14 @@ export default function HydroChart(props) {
       stroke: "#f97316",
       width: 2.5,
       scale: "Q",
+    },
+    {
+      label: "Prediction H (m)",
+      stroke: "#0d9488",
+      width: 2,
+      dash: [6, 4],
+      scale: "H",
+      value: (u, v) => v == null ? "--" : v.toFixed(2),
     },
   ];
 

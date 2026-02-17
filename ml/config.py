@@ -71,6 +71,7 @@ STATIONS = [
         "lon": -1.225,
         "river": "Cantache",
         "position": "amont",
+        "no_q": True,
     },
     {
         "code": "J705302001",
@@ -108,6 +109,9 @@ STATIONS = [
 ]
 
 STATION_CODES = [s["code"] for s in STATIONS]
+
+# Stations sans données de débit (barrages + stations sans Q temps réel)
+STATIONS_NO_Q = {s["code"] for s in STATIONS if s.get("barrage") or s.get("no_q")}
 
 # --- Index ordinal des stations (pour features statiques) ---
 STATION_INDEX = {s["code"]: i for i, s in enumerate(STATIONS)}

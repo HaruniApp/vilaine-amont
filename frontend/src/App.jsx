@@ -66,6 +66,7 @@ export default function App() {
   const [error, setError] = createSignal(null);
   const [dataH, setDataH] = createSignal(null);
   const [dataQ, setDataQ] = createSignal(null);
+  const [forecastData, setForecastData] = createSignal(null);
 
   fetchData();
 
@@ -74,6 +75,7 @@ export default function App() {
     setError(null);
     setDataH(null);
     setDataQ(null);
+    setForecastData(null);
 
     const start = formatDate(new Date(startDate()));
     const end = formatDate(new Date(endDate()));
@@ -84,18 +86,21 @@ export default function App() {
     };
 
     try {
-      const [resH, resQ] = await Promise.all([
+      const [resH, resQ, resForecast] = await Promise.all([
         fetch(buildUrl('H')),
         fetch(buildUrl('Q')),
+        fetch(`/api/station/${stationId()}/forecast`).catch(() => null),
       ]);
 
       if (!resH.ok && !resQ.ok) throw new Error(`Erreur H:${resH.status} Q:${resQ.status}`);
 
       const jsonH = resH.ok ? await resH.json() : null;
       const jsonQ = resQ.ok ? await resQ.json() : null;
+      const jsonForecast = resForecast?.ok ? await resForecast.json() : null;
 
       setDataH(jsonH);
       setDataQ(jsonQ);
+      setForecastData(jsonForecast?.forecasts?.length ? jsonForecast : null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -198,7 +203,7 @@ export default function App() {
         </p>
       )}
 
-      {(dataH() || dataQ()) && <HydroChart dataH={dataH()} dataQ={dataQ()} />}
+      {(dataH() || dataQ()) && <HydroChart dataH={dataH()} dataQ={dataQ()} forecast={forecastData()} />}
 
       <details style={{
         "margin-top": "1.5rem",
