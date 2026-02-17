@@ -66,18 +66,28 @@ async function fetchHydroSeries(stationId, startAt, endAt, variable) {
   });
 
   const url = `https://www.hydro.eaufrance.fr/stationhydro/ajax/${stationId}/series?${params}`;
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': 'application/json, text/javascript, */*; q=0.01',
-      'Referer': `https://www.hydro.eaufrance.fr/stationhydro/${stationId}/series`,
-      'X-Requested-With': 'XMLHttpRequest',
-    },
-  });
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Referer': `https://www.hydro.eaufrance.fr/stationhydro/${stationId}/series`,
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+    });
 
-  if (!response.ok) return [];
-  const data = await response.json();
-  return data?.series?.data ?? [];
+    if (!response.ok) {
+      console.warn(`  Hydro ${stationId} ${variable}: HTTP ${response.status}`);
+      return [];
+    }
+    const data = await response.json();
+    const points = data?.series?.data ?? [];
+    console.log(`  Hydro ${stationId} ${variable}: ${points.length} pts`);
+    return points;
+  } catch (err) {
+    console.warn(`  Hydro ${stationId} ${variable}: ${err.message}`);
+    return [];
+  }
 }
 
 async function fetchPrecipitation(lat, lon, pastHours) {
@@ -183,27 +193,28 @@ export async function forecast(stationId) {
   const startStr = formatDateHydro(startDate);
   const endStr = formatDateHydro(now);
 
-  // Fetch all hydro data in parallel
-  const hydroPromises = [];
+  // Fetch hydro data station by station (avoid rate-limiting)
+  console.log('Fetching hydro data...');
+  const hydroResults = [];
   for (const code of STATION_CODES) {
-    hydroPromises.push(fetchHydroSeries(code, startStr, endStr, 'H'));
+    const h = await fetchHydroSeries(code, startStr, endStr, 'H');
+    hydroResults.push(h);
     if (!STATIONS_NO_Q.has(code)) {
-      hydroPromises.push(fetchHydroSeries(code, startStr, endStr, 'Q'));
+      const q = await fetchHydroSeries(code, startStr, endStr, 'Q');
+      hydroResults.push(q);
     } else {
-      hydroPromises.push(Promise.resolve([]));
+      hydroResults.push([]);
     }
   }
 
-  // Fetch precipitation for all stations
-  const precipPromises = STATION_CODES.map(code => {
-    const { lat, lon } = STATION_COORDS[code];
-    return fetchPrecipitation(lat, lon, inputWindow + 2);
-  });
-
-  const [hydroResults, precipResults] = await Promise.all([
-    Promise.all(hydroPromises),
-    Promise.all(precipPromises),
-  ]);
+  // Fetch precipitation for all stations (Open-Meteo is more tolerant)
+  console.log('Fetching precipitation...');
+  const precipResults = await Promise.all(
+    STATION_CODES.map(code => {
+      const { lat, lon } = STATION_COORDS[code];
+      return fetchPrecipitation(lat, lon, inputWindow + 2);
+    })
+  );
 
   // Organize hydro data: station -> { h: [], q: [] }
   const stationData = {};
@@ -230,12 +241,14 @@ export async function forecast(stationId) {
 
   for (let i = 0; i < inputWindow; i++) {
     const dt = hourlyTimestamps[i];
-    const hour = dt.getHours();
-    const doy = Math.floor((dt - new Date(dt.getFullYear(), 0, 0)) / 86400000);
+    // Use UTC hours to match training data (prepare_dataset uses tz-naive UTC timestamps)
+    const hour = dt.getUTCHours();
+    const startOfYear = new Date(Date.UTC(dt.getUTCFullYear(), 0, 0));
+    const doy = Math.floor((dt - startOfYear) / 86400000);
     hourSin[i] = Math.sin(2 * Math.PI * hour / 24);
     hourCos[i] = Math.cos(2 * Math.PI * hour / 24);
-    doySin[i] = Math.sin(2 * Math.PI * doy / 365);
-    doyCos[i] = Math.cos(2 * Math.PI * doy / 365);
+    doySin[i] = Math.sin(2 * Math.PI * doy / 365.25);
+    doyCos[i] = Math.cos(2 * Math.PI * doy / 365.25);
   }
 
   // Build feature map
