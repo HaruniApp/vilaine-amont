@@ -1,23 +1,32 @@
 """Reproduit le pipeline de forecast.js en Python pour comparer.
 
 Fetch les mêmes données temps réel, applique le même preprocessing que
-forecast.js, puis compare avec le preprocessing de prepare_dataset.py.
+forecast.js, puis lance l'inférence ONNX et compare.
 
 Usage:
     python debug_realtime.py
 """
 
 import json
+import math
 from datetime import datetime, timedelta
 
 import numpy as np
 import requests
 import onnxruntime as ort
 
-from config import DH_CLIP, DQ_CLIP, ONNX_DIR, PROCESSED_DIR, STATION_CODES, STATIONS, FORECAST_HORIZONS
+from config import (
+    BARRAGE_CODES,
+    DH_CLIP, DQ_CLIP,
+    FUTURE_PRECIP_HOURS,
+    ONNX_DIR,
+    STATION_CODES, STATIONS,
+)
 
 STATIONS_NO_Q = {s["code"] for s in STATIONS if s.get("barrage") or s.get("no_q")}
 STATION_COORDS = {s["code"]: (s["lat"], s["lon"]) for s in STATIONS}
+
+VARS_PER_STATION = 5
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -27,7 +36,6 @@ HEADERS = {
 
 
 def fetch_hydro(station_id, start_str, end_str, variable):
-    """Fetch comme forecast.js."""
     url = f"https://www.hydro.eaufrance.fr/stationhydro/ajax/{station_id}/series"
     params = {
         "hydro_series[startAt]": start_str,
@@ -52,10 +60,10 @@ def fetch_hydro(station_id, start_str, end_str, variable):
         return []
 
 
-def fetch_precip(lat, lon, past_hours):
-    """Fetch comme forecast.js."""
+def fetch_precip(lat, lon, past_hours, forecast_hours):
     url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-           f"&past_hours={past_hours}&forecast_hours=0&hourly=precipitation&timezone=Europe%2FParis")
+           f"&past_hours={past_hours}&forecast_hours={forecast_hours}"
+           f"&hourly=precipitation&timezone=Europe%2FParis")
     try:
         resp = requests.get(url, timeout=30)
         data = resp.json()
@@ -75,8 +83,8 @@ def build_hourly_index(count, last_hour):
     return [last_hour - timedelta(hours=count - 1 - i) for i in range(count)]
 
 
-def align_hydro_js_style(points, hourly_ts):
-    """Reproduit alignToHourlyGrid de forecast.js : floor to hour, last value wins."""
+def align_hydro(points, hourly_ts):
+    """Forward-fill alignment (matches forecast.js)."""
     ts_map = {}
     for p in points:
         t = datetime.fromisoformat(p["t"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -93,7 +101,6 @@ def align_hydro_js_style(points, hourly_ts):
         else:
             result[i] = last_val
 
-    # Fill leading nulls
     if result[0] is None:
         first_known = next((v for v in result if v is not None), 0)
         for i in range(len(result)):
@@ -105,46 +112,21 @@ def align_hydro_js_style(points, hourly_ts):
     return result
 
 
-def align_hydro_train_style(points, hourly_ts):
-    """Reproduit prepare_dataset.py : floor to hour, MEAN of values in same hour."""
-    from collections import defaultdict
-    ts_sums = defaultdict(list)
-    for p in points:
-        t = datetime.fromisoformat(p["t"].replace("Z", "+00:00")).replace(tzinfo=None)
-        t_hour = t.replace(minute=0, second=0, microsecond=0)
-        ts_sums[t_hour].append(p["v"])
-
-    ts_map = {k: sum(v) / len(v) for k, v in ts_sums.items()}
-
-    result = [None] * len(hourly_ts)
-    for i, ts in enumerate(hourly_ts):
-        result[i] = ts_map.get(ts)
-
-    # Linear interpolation (max 6h gaps) like prepare_dataset
-    import pandas as pd
-    s = pd.Series(result)
-    s = s.interpolate(method="linear", limit=6)
-
-    # Remaining NaN → forward fill then 0
-    s = s.fillna(method="ffill").fillna(0)
-    return s.tolist()
-
-
 def align_precip(points, hourly_ts):
-    """Reproduit alignPrecipToGrid de forecast.js."""
     ts_map = {}
     for p in points:
-        # Open-Meteo: "2024-01-01T00:00" format (Europe/Paris, no tz suffix)
         t = datetime.fromisoformat(p["t"])
         ts_map[t] = p.get("v", 0) or 0
-
     return [ts_map.get(ts, 0) for ts in hourly_ts]
 
 
-def compute_derivative(values):
+def compute_central_derivative(values):
     d = [0.0]
-    for i in range(1, len(values)):
-        d.append((values[i] or 0) - (values[i-1] or 0))
+    for i in range(1, len(values) - 1):
+        prev = values[i - 1] or 0
+        nxt = values[i + 1] or 0
+        d.append((nxt - prev) / 2.0)
+    d.append(0.0)
     return d
 
 
@@ -155,25 +137,31 @@ def normalize(value, fmin, fmax):
 
 
 def main():
-    with open(ONNX_DIR / "tft_meta.json") as f:
+    with open(ONNX_DIR / "station_attn_meta.json") as f:
         meta = json.load(f)
     with open(ONNX_DIR / "norm_params.json") as f:
         norm_params = json.load(f)
 
     input_window = meta["input_window"]  # 72
+    future_hours = meta["future_precip_hours"]  # 6
+    n_stations = meta["n_stations"]
     now = datetime.utcnow()
     last_hour = round_to_hour(now)
-    start_date = last_hour - timedelta(hours=input_window + 1)
     hourly_ts = build_hourly_index(input_window, last_hour)
 
+    # Future timestamps
+    future_ts = [last_hour + timedelta(hours=h) for h in range(1, future_hours + 1)]
+    all_precip_ts = hourly_ts + future_ts
+
+    start_date = last_hour - timedelta(hours=input_window + 1)
     start_str = start_date.strftime("%d/%m/%Y")
     end_str = now.strftime("%d/%m/%Y")
 
     print(f"Grid: {hourly_ts[0].isoformat()} → {hourly_ts[-1].isoformat()} (UTC)")
-    print(f"Fetch range: {start_str} → {end_str}")
+    print(f"Future precip: {future_ts[0].isoformat()} → {future_ts[-1].isoformat()}")
     print()
 
-    # Fetch hydro data (sequential like fixed forecast.js)
+    # Fetch hydro data
     print("Fetching hydro data...")
     hydro_raw = {}
     for code in STATION_CODES:
@@ -183,97 +171,106 @@ def main():
         else:
             hydro_raw[(code, "Q")] = []
 
-    # Fetch precip
-    print("\nFetching precipitation...")
+    # Fetch precip (past + future)
+    print("\nFetching precipitation (past + forecast)...")
     precip_raw = {}
     for code in STATION_CODES:
         lat, lon = STATION_COORDS[code]
-        precip_raw[code] = fetch_precip(lat, lon, input_window + 2)
+        precip_raw[code] = fetch_precip(lat, lon, input_window + 2, future_hours + 1)
 
-    # Build features with BOTH alignment strategies
-    target_col = f"{meta['target_station']}_h"
+    # Organize data
+    station_data = {}
+    for code in STATION_CODES:
+        h_arr = align_hydro(hydro_raw[(code, "H")], hourly_ts)
+        q_arr = align_hydro(hydro_raw[(code, "Q")], hourly_ts)
+        all_precip = align_precip(precip_raw[code], all_precip_ts)
+        precip_past = all_precip[:input_window]
+        precip_future = all_precip[input_window:input_window + future_hours]
+        station_data[code] = {"h": h_arr, "q": q_arr, "precip": precip_past, "precip_future": precip_future}
 
-    for style_name, align_fn in [("JS (forward-fill)", align_hydro_js_style),
-                                   ("Train (mean+interp)", align_hydro_train_style)]:
-        print(f"\n{'='*60}")
-        print(f"Preprocessing style: {style_name}")
-        print(f"{'='*60}")
+    # Derivatives (central) + clip
+    for code in STATION_CODES:
+        station_data[code]["dh"] = [max(-DH_CLIP, min(DH_CLIP, v)) for v in compute_central_derivative(station_data[code]["h"])]
+        station_data[code]["dq"] = [max(-DQ_CLIP, min(DQ_CLIP, v)) for v in compute_central_derivative(station_data[code]["q"])]
 
-        station_data = {}
-        for code in STATION_CODES:
-            station_data[code] = {
-                "h": align_fn(hydro_raw[(code, "H")], hourly_ts),
-                "q": align_fn(hydro_raw[(code, "Q")], hourly_ts),
-                "precip": align_precip(precip_raw[code], hourly_ts),
-            }
-            station_data[code]["dh"] = compute_derivative(station_data[code]["h"])
-            station_data[code]["dq"] = compute_derivative(station_data[code]["q"])
-            # Clip outliers pour cohérence avec l'entraînement
-            station_data[code]["dh"] = [max(-DH_CLIP, min(DH_CLIP, v)) if v is not None else None for v in station_data[code]["dh"]]
-            station_data[code]["dq"] = [max(-DQ_CLIP, min(DQ_CLIP, v)) if v is not None else None for v in station_data[code]["dq"]]
+    # Release feature for barrages
+    for code in BARRAGE_CODES:
+        dh = station_data[code]["dh"]
+        precip = station_data[code]["precip"]
+        station_data[code]["release"] = [
+            max(0, -(dh[i] or 0)) * (1 - min(1, precip[i] or 0))
+            for i in range(input_window)
+        ]
 
-        # Temporal features (UTC, like fixed forecast.js)
-        hour_sin, hour_cos, doy_sin, doy_cos = [], [], [], []
-        for dt in hourly_ts:
-            hour = dt.hour
-            doy = dt.timetuple().tm_yday
-            import math
-            hour_sin.append(math.sin(2 * math.pi * hour / 24))
-            hour_cos.append(math.cos(2 * math.pi * hour / 24))
-            doy_sin.append(math.sin(2 * math.pi * doy / 365.25))
-            doy_cos.append(math.cos(2 * math.pi * doy / 365.25))
+    # --- Build past tensor (padded) ---
+    n_features_padded = n_stations * VARS_PER_STATION
+    past_tensor = np.zeros((1, input_window, n_features_padded), dtype=np.float32)
 
-        feature_map = {}
-        for code in STATION_CODES:
-            feature_map[f"{code}_h"] = station_data[code]["h"]
-            feature_map[f"{code}_q"] = station_data[code]["q"]
-            feature_map[f"{code}_precip"] = station_data[code]["precip"]
-            feature_map[f"{code}_dh"] = station_data[code]["dh"]
-            feature_map[f"{code}_dq"] = station_data[code]["dq"]
-        feature_map["hour_sin"] = hour_sin
-        feature_map["hour_cos"] = hour_cos
-        feature_map["doy_sin"] = doy_sin
-        feature_map["doy_cos"] = doy_cos
+    for t in range(input_window):
+        for s, code in enumerate(STATION_CODES):
+            base = s * VARS_PER_STATION
+            sd = station_data[code]
+            np_h = norm_params.get(f"{code}_h", {})
+            np_precip = norm_params.get(f"{code}_precip", {})
+            np_dh = norm_params.get(f"{code}_dh", {})
 
-        # Static spatial features: already in final form (added after normalization in training)
-        static_suffixes = ("_dist_to_target", "_is_upstream", "_is_barrage",
-                           "_branch_vilaine", "_branch_valiere", "_branch_cantache", "_branch_veuvre")
-        static_features = {f"{code}{s}" for code in STATION_CODES for s in static_suffixes}
+            past_tensor[0, t, base + 0] = normalize(sd["h"][t] or 0, np_h.get("min"), np_h.get("max"))
+            past_tensor[0, t, base + 2] = normalize(sd["precip"][t] or 0, np_precip.get("min"), np_precip.get("max"))
+            past_tensor[0, t, base + 3] = normalize(sd["dh"][t] or 0, np_dh.get("min"), np_dh.get("max"))
 
-        # Build tensor
-        tensor = np.zeros((1, input_window, meta["n_features"]), dtype=np.float32)
-        for t in range(input_window):
-            for f_idx, fname in enumerate(meta["feature_names"]):
-                raw = (feature_map.get(fname) or [0] * input_window)[t] or 0
-                if fname in static_features:
-                    tensor[0, t, f_idx] = raw
-                else:
-                    np_f = norm_params.get(fname, {})
-                    tensor[0, t, f_idx] = normalize(raw, np_f.get("min"), np_f.get("max"))
+            if code not in STATIONS_NO_Q:
+                np_q = norm_params.get(f"{code}_q", {})
+                np_dq = norm_params.get(f"{code}_dq", {})
+                past_tensor[0, t, base + 1] = normalize(sd["q"][t] or 0, np_q.get("min"), np_q.get("max"))
+                past_tensor[0, t, base + 4] = normalize(sd["dq"][t] or 0, np_dq.get("min"), np_dq.get("max"))
+            elif code in BARRAGE_CODES:
+                np_release = norm_params.get(f"{code}_release", {})
+                past_tensor[0, t, base + 4] = normalize(sd.get("release", [0]*input_window)[t], np_release.get("min"), np_release.get("max"))
 
-        # Show target H at last timestep
-        target_idx = meta["feature_names"].index(target_col)
-        h_norm = tensor[0, -1, target_idx]
-        np_t = norm_params[target_col]
-        h_raw = h_norm * (np_t["max"] - np_t["min"]) + np_t["min"]
-        print(f"\n{target_col} at t=71: norm={h_norm:.6f} → raw={h_raw:.1f} mm → {h_raw/1000:.3f} m")
+    # --- Build future precip tensor ---
+    future_precip_tensor = np.zeros((1, n_stations * future_hours), dtype=np.float32)
+    for s, code in enumerate(STATION_CODES):
+        np_precip = norm_params.get(f"{code}_precip", {})
+        pf = station_data[code]["precip_future"]
+        for h in range(future_hours):
+            val = pf[h] if h < len(pf) else 0
+            future_precip_tensor[0, s * future_hours + h] = normalize(val, np_precip.get("min"), np_precip.get("max"))
 
-        # Show a few key features at last timestep
-        print(f"Key features at t=71:")
-        for fname in [f"{meta['target_station']}_q", f"{meta['target_station']}_dh",
-                       f"{meta['target_station']}_dq", "hour_sin", "hour_cos"]:
-            f_idx = meta["feature_names"].index(fname)
-            print(f"  {fname}: norm={tensor[0, -1, f_idx]:.6f}")
+    # --- Run ONNX inference ---
+    session = ort.InferenceSession(str(ONNX_DIR / "station_attn.onnx"))
+    outputs = session.run(None, {
+        "past_input": past_tensor,
+        "future_precip": future_precip_tensor,
+    })
+    predictions = outputs[0][0]
 
-        # ONNX inference
-        session = ort.InferenceSession(str(ONNX_DIR / "tft.onnx"))
-        outputs = session.run(None, {"input": tensor})
-        predictions = outputs[0][0]
+    print(f"\nPredictions ({len(predictions)} outputs):")
 
-        print(f"\nPredictions:")
-        for i, h in enumerate(FORECAST_HORIZONS):
-            raw_mm = predictions[i] * (np_t["max"] - np_t["min"]) + np_t["min"]
-            print(f"  t+{h:>2d}h: norm={predictions[i]:.6f} → {raw_mm:.1f} mm → {raw_mm/1000:.3f} m")
+    output_map = meta["output_map"]
+    forecast_horizons = meta["forecast_horizons"]
+
+    for code in STATION_CODES:
+        om = output_map[code]
+        np_h = norm_params.get(f"{code}_h", {})
+        h_range = (np_h.get("max", 0) or 0) - (np_h.get("min", 0) or 0)
+        last_h_norm = normalize(station_data[code]["h"][-1] or 0, np_h.get("min"), np_h.get("max"))
+
+        print(f"\n  {code} H:")
+        for j, h in enumerate(forecast_horizons):
+            delta = predictions[om["h_start"] + j]
+            raw_mm = (last_h_norm + delta) * h_range + (np_h.get("min", 0) or 0)
+            print(f"    t+{h:>2d}h: delta={delta:.6f} → {raw_mm:.1f} mm → {raw_mm/1000:.3f} m")
+
+        if "q_start" in om:
+            np_q = norm_params.get(f"{code}_q", {})
+            q_range = (np_q.get("max", 0) or 0) - (np_q.get("min", 0) or 0)
+            last_q_norm = normalize(station_data[code]["q"][-1] or 0, np_q.get("min"), np_q.get("max"))
+
+            print(f"  {code} Q:")
+            for j, h in enumerate(forecast_horizons):
+                delta = predictions[om["q_start"] + j]
+                raw_ls = (last_q_norm + delta) * q_range + (np_q.get("min", 0) or 0)
+                print(f"    t+{h:>2d}h: delta={delta:.6f} → {raw_ls:.0f} L/s → {raw_ls/1000:.3f} m³/s")
 
 
 if __name__ == "__main__":

@@ -113,57 +113,8 @@ STATION_CODES = [s["code"] for s in STATIONS]
 # Stations sans données de débit (barrages + stations sans Q temps réel)
 STATIONS_NO_Q = {s["code"] for s in STATIONS if s.get("barrage") or s.get("no_q")}
 
-# --- Index ordinal des stations (pour features statiques) ---
-STATION_INDEX = {s["code"]: i for i, s in enumerate(STATIONS)}
-
-# --- Topologie du réseau fluvial ---
-RIVER_BRANCHES = ["vilaine", "valiere", "cantache", "veuvre"]
-
-STATION_BRANCH = {
-    "J700061001": "vilaine",   # Bourgon
-    "J701064001": "vilaine",   # La Chapelle-Erbrée
-    "J702401001": "valiere",   # Erbrée Ravenières
-    "J702403001": "valiere",   # retenue Valière
-    "J702402001": "valiere",   # Vitré Château
-    "J701061001": "vilaine",   # Vitré Bas Pont
-    "J704301001": "cantache",  # Taillis
-    "J705302001": "cantache",  # Pocé-les-Bois
-    "J706062001": "vilaine",   # Châteaubourg (TARGET)
-    "J708311001": "veuvre",    # La Bouëxière
-    "J709063002": "vilaine",   # Cesson-Sévigné
-}
-
-# Distance rivière estimée jusqu'à Châteaubourg (km, négatif = aval)
-RIVER_DISTANCES_KM = {
-    "J700061001": 62.0,   # Bourgon
-    "J701064001": 48.0,   # La Chapelle-Erbrée
-    "J702401001": 38.0,   # Erbrée (Valière)
-    "J702403001": 28.0,   # retenue Valière
-    "J702402001": 22.0,   # Vitré Château (Valière)
-    "J701061001": 18.0,   # Vitré Bas Pont
-    "J704301001": 24.0,   # Taillis (Cantache)
-    "J705302001": 12.0,   # Pocé-les-Bois (Cantache)
-    "J706062001":  0.0,   # Châteaubourg TARGET
-    "J708311001": -8.0,   # La Bouëxière (aval)
-    "J709063002": -25.0,  # Cesson-Sévigné (aval)
-}
-
-# Temps de propagation vers Châteaubourg (heures, None = aval/cible)
-PROPAGATION_HOURS = {
-    "J700061001": 9,
-    "J701064001": 7,
-    "J702401001": 7,
-    "J702403001": 6,
-    "J702402001": 5,
-    "J701061001": 4,
-    "J704301001": 5,
-    "J705302001": 3,
-    "J706062001": None,
-    "J708311001": None,
-    "J709063002": None,
-}
-
-MAX_PROPAGATION_HOURS = max(v for v in PROPAGATION_HOURS.values() if v is not None)
+# Stations barrages
+BARRAGE_CODES = {s["code"] for s in STATIONS if s.get("barrage")}
 
 # --- Paramètres de collecte ---
 COLLECT_START_DATE = "2000-01-01"
@@ -172,6 +123,7 @@ COLLECT_END_DATE = date.today().strftime("%Y-%m-%d")
 # --- Paramètres du dataset ---
 INPUT_WINDOW_HOURS = 72       # fenêtre d'entrée par défaut (heures)
 FORECAST_HORIZONS = [1, 3, 6, 12, 24]  # horizons de prédiction (heures)
+FUTURE_PRECIP_HOURS = 6                # heures de précipitations futures
 
 # --- Paramètres d'entraînement ---
 TRAIN_END = "2023-12-31"

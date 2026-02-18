@@ -33,35 +33,14 @@ const STATION_CODES = [
   'J709063002',
 ];
 
-// --- Topology du réseau fluvial (miroir de ml/config.py) ---
-const RIVER_BRANCHES = ['vilaine', 'valiere', 'cantache', 'veuvre'];
-
-const STATION_BRANCH = {
-  J700061001: 'vilaine', J701064001: 'vilaine', J702401001: 'valiere',
-  J702403001: 'valiere', J702402001: 'valiere', J701061001: 'vilaine',
-  J704301001: 'cantache', J705302001: 'cantache', J706062001: 'vilaine',
-  J708311001: 'veuvre', J709063002: 'vilaine',
-};
-
-const RIVER_DISTANCES_KM = {
-  J700061001: 62, J701064001: 48, J702401001: 38, J702403001: 28,
-  J702402001: 22, J701061001: 18, J704301001: 24, J705302001: 12,
-  J706062001: 0, J708311001: -8, J709063002: -25,
-};
-
-const PROPAGATION_HOURS = {
-  J700061001: 9, J701064001: 7, J702401001: 7, J702403001: 6,
-  J702402001: 5, J701061001: 4, J704301001: 5, J705302001: 3,
-  J706062001: null, J708311001: null, J709063002: null,
-};
-
-const MAX_PROPAGATION_HOURS = Math.max(
-  ...Object.values(PROPAGATION_HOURS).filter(v => v != null)
-);
-
-const MAX_DIST = Math.max(...Object.values(RIVER_DISTANCES_KM).map(Math.abs));
-
 const BARRAGE_CODES = new Set(['J701064001', 'J702403001', 'J705302001']);
+
+// Clipping des outliers
+const DH_CLIP = 100;
+const DQ_CLIP = 2000;
+
+// Vars per station (padded, uniform)
+const VARS_PER_STATION = 5;
 
 let session = null;
 let meta = null;
@@ -70,14 +49,14 @@ let normParams = null;
 async function init() {
   if (session) return;
 
-  const onnxPath = join(MODELS_DIR, 'tft.onnx');
+  const onnxPath = join(MODELS_DIR, 'station_attn.onnx');
   if (!existsSync(onnxPath)) {
     throw Object.assign(new Error('model_not_found'), { code: 'MODEL_NOT_FOUND' });
   }
 
   const ort = await import('onnxruntime-node');
   session = await ort.InferenceSession.create(onnxPath);
-  meta = JSON.parse(await readFile(join(MODELS_DIR, 'tft_meta.json'), 'utf-8'));
+  meta = JSON.parse(await readFile(join(MODELS_DIR, 'station_attn_meta.json'), 'utf-8'));
   normParams = JSON.parse(await readFile(join(MODELS_DIR, 'norm_params.json'), 'utf-8'));
 }
 
@@ -122,8 +101,8 @@ async function fetchHydroSeries(stationId, startAt, endAt, variable) {
   }
 }
 
-async function fetchPrecipitation(lat, lon, pastHours) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&past_hours=${pastHours}&forecast_hours=0&hourly=precipitation&timezone=Europe%2FParis`;
+async function fetchPrecipitation(lat, lon, pastHours, forecastHours) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&past_hours=${pastHours}&forecast_hours=${forecastHours}&hourly=precipitation&timezone=Europe%2FParis`;
   const data = await cachedFetch(url, {}, TTL_30MIN);
   if (!data) return [];
   const times = data?.hourly?.time ?? [];
@@ -146,7 +125,6 @@ function buildHourlyIndex(count, lastHour) {
 }
 
 function alignToHourlyGrid(points, hourlyTimestamps) {
-  // Build a map from hour-rounded timestamp to value
   const map = new Map();
   for (const p of points) {
     const ts = roundToHour(new Date(p.t)).getTime();
@@ -162,12 +140,10 @@ function alignToHourlyGrid(points, hourlyTimestamps) {
       result[i] = val;
       lastVal = val;
     } else {
-      // Pad with last known value
       result[i] = lastVal;
     }
   }
 
-  // Fill leading nulls with first known value
   if (result[0] == null) {
     const firstKnown = result.find(v => v != null) ?? 0;
     for (let i = 0; i < result.length; i++) {
@@ -182,7 +158,6 @@ function alignToHourlyGrid(points, hourlyTimestamps) {
 function alignPrecipToGrid(points, hourlyTimestamps) {
   const map = new Map();
   for (const p of points) {
-    // Open-Meteo returns "2024-01-01T00:00" format
     const ts = new Date(p.t).getTime();
     map.set(ts, p.v ?? 0);
   }
@@ -194,40 +169,46 @@ function alignPrecipToGrid(points, hourlyTimestamps) {
   return result;
 }
 
-function computeDerivative(values) {
+function computeCentralDerivative(values) {
   const d = new Array(values.length);
   d[0] = 0;
-  for (let i = 1; i < values.length; i++) {
-    d[i] = (values[i] ?? 0) - (values[i - 1] ?? 0);
+  for (let i = 1; i < values.length - 1; i++) {
+    const prev = values[i - 1] ?? 0;
+    const next = values[i + 1] ?? 0;
+    d[i] = (next - prev) / 2.0;
   }
+  d[values.length - 1] = 0;
   return d;
 }
 
 function normalize(value, min, max) {
-  if (max === min || isNaN(min) || isNaN(max)) return 0;
+  if (max === min || min == null || max == null || isNaN(min) || isNaN(max)) return 0;
   return (value - min) / (max - min);
 }
 
 export async function forecast(stationId) {
   await init();
 
-  if (meta.target_station !== stationId) {
-    return { forecasts: [], target_station: meta.target_station, model: 'tft', info: 'predictions_only_for_target' };
-  }
-
   const inputWindow = meta.input_window; // 72
+  const futureHours = meta.future_precip_hours; // 6
+  const nStations = meta.n_stations; // 11
   const now = new Date();
   const lastHour = roundToHour(now);
-  // Extend fetch window to cover lag features (need MAX_PROPAGATION_HOURS extra hours)
-  const extendedHours = inputWindow + MAX_PROPAGATION_HOURS;
-  const startDate = new Date(lastHour.getTime() - (extendedHours + 1) * 3600000);
-  const extendedTimestamps = buildHourlyIndex(extendedHours, lastHour);
-  const hourlyTimestamps = extendedTimestamps.slice(-inputWindow);
+  const startDate = new Date(lastHour.getTime() - (inputWindow + 1) * 3600000);
+  const hourlyTimestamps = buildHourlyIndex(inputWindow, lastHour);
+
+  // Future timestamps for precip
+  const futureTimestamps = [];
+  for (let h = 1; h <= futureHours; h++) {
+    futureTimestamps.push(new Date(lastHour.getTime() + h * 3600000));
+  }
+  // Combined timestamps for precip fetch (past + future)
+  const allPrecipTimestamps = [...hourlyTimestamps, ...futureTimestamps];
 
   const startStr = formatDateHydro(startDate);
   const endStr = formatDateHydro(now);
 
-  // Fetch hydro data station by station (avoid rate-limiting)
+  // Fetch hydro data
   console.log('Fetching hydro data...');
   const hydroResults = [];
   for (const code of STATION_CODES) {
@@ -241,207 +222,147 @@ export async function forecast(stationId) {
     }
   }
 
-  // Fetch precipitation for all stations (Open-Meteo is more tolerant)
-  console.log('Fetching precipitation...');
+  // Fetch precipitation with future forecast
+  console.log('Fetching precipitation (past + forecast)...');
   const precipResults = await Promise.all(
     STATION_CODES.map(code => {
       const { lat, lon } = STATION_COORDS[code];
-      return fetchPrecipitation(lat, lon, extendedHours + 2);
+      return fetchPrecipitation(lat, lon, inputWindow + 2, futureHours + 1);
     })
   );
 
-  // Organize hydro data on extended grid, then slice for main features
-  const stationDataExt = {};
+  // Organize data
   const stationData = {};
   for (let i = 0; i < STATION_CODES.length; i++) {
     const code = STATION_CODES[i];
-    const hExt = alignToHourlyGrid(hydroResults[i * 2], extendedTimestamps);
-    const qExt = alignToHourlyGrid(hydroResults[i * 2 + 1], extendedTimestamps);
-    const precipExt = alignPrecipToGrid(precipResults[i], extendedTimestamps);
-    stationDataExt[code] = { h: hExt, q: qExt, precip: precipExt };
-    stationData[code] = {
-      h: hExt.slice(-inputWindow),
-      q: qExt.slice(-inputWindow),
-      precip: precipExt.slice(-inputWindow),
-    };
+    const hArr = alignToHourlyGrid(hydroResults[i * 2], hourlyTimestamps);
+    const qArr = alignToHourlyGrid(hydroResults[i * 2 + 1], hourlyTimestamps);
+    const allPrecip = alignPrecipToGrid(precipResults[i], allPrecipTimestamps);
+    const precipPast = allPrecip.slice(0, inputWindow);
+    const precipFuture = allPrecip.slice(inputWindow, inputWindow + futureHours);
+
+    stationData[code] = { h: hArr, q: qArr, precip: precipPast, precipFuture };
   }
 
-  // Log-transform H and Q (before derivatives, matching prepare_dataset.py)
-  const logTransformCols = new Set(meta.log_transform_cols ?? []);
+  // Compute derivatives (central) + clip
   for (const code of STATION_CODES) {
-    if (logTransformCols.has(`${code}_h`)) {
-      stationData[code].h = stationData[code].h.map(v => Math.log1p(Math.max(v, 0)));
-    }
-    if (logTransformCols.has(`${code}_q`)) {
-      stationData[code].q = stationData[code].q.map(v => Math.log1p(Math.max(v, 0)));
-    }
+    stationData[code].dh = computeCentralDerivative(stationData[code].h)
+      .map(v => Math.max(-DH_CLIP, Math.min(DH_CLIP, v)));
+    stationData[code].dq = computeCentralDerivative(stationData[code].q)
+      .map(v => Math.max(-DQ_CLIP, Math.min(DQ_CLIP, v)));
   }
 
-  // Compute derivatives (on log-transformed values) + clip outliers
-  const DH_CLIP = 100, DQ_CLIP = 2000;
-  for (const code of STATION_CODES) {
-    stationData[code].dh = computeDerivative(stationData[code].h)
-      .map(v => v == null ? null : Math.max(-DH_CLIP, Math.min(DH_CLIP, v)));
-    stationData[code].dq = computeDerivative(stationData[code].q)
-      .map(v => v == null ? null : Math.max(-DQ_CLIP, Math.min(DQ_CLIP, v)));
+  // Compute release feature for barrages
+  for (const code of BARRAGE_CODES) {
+    const dh = stationData[code].dh;
+    const precip = stationData[code].precip;
+    stationData[code].release = dh.map((d, i) => {
+      const neg_dh = Math.max(0, -(d ?? 0));
+      const p = Math.min(1, precip[i] ?? 0);
+      return neg_dh * (1 - p);
+    });
   }
 
-  // Compute temporal features
-  const hourSin = new Array(inputWindow);
-  const hourCos = new Array(inputWindow);
-  const doySin = new Array(inputWindow);
-  const doyCos = new Array(inputWindow);
+  // --- Build past tensor (padded: n_stations * 5 vars) ---
+  // Slot order per station: 0=h, 1=q, 2=precip, 3=dh, 4=dq/release
+  const nFeaturesPadded = nStations * VARS_PER_STATION;
+  const pastTensor = new Float32Array(inputWindow * nFeaturesPadded);
 
-  for (let i = 0; i < inputWindow; i++) {
-    const dt = hourlyTimestamps[i];
-    // Use UTC hours to match training data (prepare_dataset uses tz-naive UTC timestamps)
-    const hour = dt.getUTCHours();
-    const startOfYear = new Date(Date.UTC(dt.getUTCFullYear(), 0, 0));
-    const doy = Math.floor((dt - startOfYear) / 86400000);
-    hourSin[i] = Math.sin(2 * Math.PI * hour / 24);
-    hourCos[i] = Math.cos(2 * Math.PI * hour / 24);
-    doySin[i] = Math.sin(2 * Math.PI * doy / 365.25);
-    doyCos[i] = Math.cos(2 * Math.PI * doy / 365.25);
-  }
-
-  // Build feature map
-  const featureMap = {};
-  for (const code of STATION_CODES) {
-    featureMap[`${code}_h`] = stationData[code].h;
-    featureMap[`${code}_q`] = stationData[code].q;
-    featureMap[`${code}_precip`] = stationData[code].precip;
-    featureMap[`${code}_dh`] = stationData[code].dh;
-    featureMap[`${code}_dq`] = stationData[code].dq;
-  }
-  featureMap['hour_sin'] = hourSin;
-  featureMap['hour_cos'] = hourCos;
-  featureMap['doy_sin'] = doySin;
-  featureMap['doy_cos'] = doyCos;
-
-  // Lag features: H of upstream stations shifted by propagation time
-  // Use raw H values (before log-transform) — same as training pipeline
-  for (const code of STATION_CODES) {
-    const lag = PROPAGATION_HOURS[code];
-    if (lag == null) continue;
-    const hExt = stationDataExt[code].h; // extended raw array
-    // Slice: for each timestep t in [0..inputWindow-1], lag value = extendedHours - inputWindow + t - lag
-    const lagArr = new Array(inputWindow);
-    for (let t = 0; t < inputWindow; t++) {
-      const extIdx = (extendedHours - inputWindow) + t - lag;
-      lagArr[t] = extIdx >= 0 ? (hExt[extIdx] ?? 0) : (hExt[0] ?? 0);
-    }
-    featureMap[`${code}_h_lag${lag}h`] = lagArr;
-  }
-
-  // Static spatial features: constant arrays for each station
-  for (const code of STATION_CODES) {
-    const distNorm = RIVER_DISTANCES_KM[code] / MAX_DIST;
-    const isUpstream = RIVER_DISTANCES_KM[code] > 0 ? 1.0 : 0.0;
-    const isBarrage = BARRAGE_CODES.has(code) ? 1.0 : 0.0;
-    const branch = STATION_BRANCH[code];
-
-    featureMap[`${code}_dist_to_target`] = new Array(inputWindow).fill(distNorm);
-    featureMap[`${code}_is_upstream`] = new Array(inputWindow).fill(isUpstream);
-    featureMap[`${code}_is_barrage`] = new Array(inputWindow).fill(isBarrage);
-    for (const b of RIVER_BRANCHES) {
-      featureMap[`${code}_branch_${b}`] = new Array(inputWindow).fill(branch === b ? 1.0 : 0.0);
-    }
-  }
-
-  // Static spatial features: already in final form (added after normalization in training)
-  const staticFeatureSuffixes = ['_dist_to_target', '_is_upstream', '_is_barrage',
-    '_branch_vilaine', '_branch_valiere', '_branch_cantache', '_branch_veuvre'];
-  const staticFeatures = new Set();
-  for (const code of STATION_CODES) {
-    for (const suffix of staticFeatureSuffixes) {
-      staticFeatures.add(`${code}${suffix}`);
-    }
-  }
-
-  // Build tensor: shape (1, 72, n_features), ordered by feature_names
-  const tensorData = new Float32Array(inputWindow * meta.n_features);
   for (let t = 0; t < inputWindow; t++) {
-    for (let f = 0; f < meta.feature_names.length; f++) {
-      const fname = meta.feature_names[f];
-      const raw = featureMap[fname]?.[t] ?? 0;
-      // Static features are not normalized (inserted after normalization in training)
-      const normalized = staticFeatures.has(fname) ? raw : normalize(raw, normParams[fname]?.min, normParams[fname]?.max);
-      tensorData[t * meta.n_features + f] = normalized;
+    for (let s = 0; s < STATION_CODES.length; s++) {
+      const code = STATION_CODES[s];
+      const base = s * VARS_PER_STATION;
+      const sd = stationData[code];
+      const np_h = normParams[`${code}_h`];
+      const np_precip = normParams[`${code}_precip`];
+      const np_dh = normParams[`${code}_dh`];
+
+      pastTensor[t * nFeaturesPadded + base + 0] = normalize(sd.h[t] ?? 0, np_h?.min, np_h?.max);
+      pastTensor[t * nFeaturesPadded + base + 2] = normalize(sd.precip[t] ?? 0, np_precip?.min, np_precip?.max);
+      pastTensor[t * nFeaturesPadded + base + 3] = normalize(sd.dh[t] ?? 0, np_dh?.min, np_dh?.max);
+
+      if (!STATIONS_NO_Q.has(code)) {
+        // Normal station: slot 1=q, slot 4=dq
+        const np_q = normParams[`${code}_q`];
+        const np_dq = normParams[`${code}_dq`];
+        pastTensor[t * nFeaturesPadded + base + 1] = normalize(sd.q[t] ?? 0, np_q?.min, np_q?.max);
+        pastTensor[t * nFeaturesPadded + base + 4] = normalize(sd.dq[t] ?? 0, np_dq?.min, np_dq?.max);
+      } else if (BARRAGE_CODES.has(code)) {
+        // Barrage: slot 1=0, slot 4=release
+        const np_release = normParams[`${code}_release`];
+        pastTensor[t * nFeaturesPadded + base + 1] = 0;
+        pastTensor[t * nFeaturesPadded + base + 4] = normalize(sd.release?.[t] ?? 0, np_release?.min, np_release?.max);
+      }
+      // else no_q non-barrage (Taillis): slots 1 and 4 stay 0
     }
   }
 
-  // --- DEBUG: log target station raw values + last timestep features ---
-  const targetCode = meta.target_station;
-  const lastT = inputWindow - 1;
-  const targetH = stationData[targetCode].h;
-  const targetQ = stationData[targetCode].q;
-  console.log('\n=== FORECAST DEBUG ===');
-  console.log(`Grid: ${hourlyTimestamps[0].toISOString()} → ${hourlyTimestamps[lastT].toISOString()}`);
-  console.log(`${targetCode}_h raw (last 6h):`, targetH.slice(-6).map(v => `${v} mm (${(v/1000).toFixed(3)} m)`));
-  console.log(`${targetCode}_q raw (last 6h):`, targetQ.slice(-6));
-  console.log(`Precip ${targetCode} (last 6h):`, stationData[targetCode].precip.slice(-6));
-  console.log(`dH (last 6h):`, stationData[targetCode].dh.slice(-6));
-
-  // Log normalized values for target_h at last timestep
-  const targetHIdx = meta.feature_names.indexOf(`${targetCode}_h`);
-  const normAtLast = tensorData[lastT * meta.n_features + targetHIdx];
-  const np = normParams[`${targetCode}_h`];
-  console.log(`\nNorm params ${targetCode}_h: min=${np.min}, max=${np.max}`);
-  console.log(`Raw H at t=${lastT}: ${targetH[lastT]} mm → normalized: ${normAtLast.toFixed(6)}`);
-
-  // Log all features at last timestep (name: raw → normalized)
-  console.log(`\nAll features at last timestep (t=${lastT}):`);
-  for (let f = 0; f < meta.feature_names.length; f++) {
-    const fname = meta.feature_names[f];
-    const raw = featureMap[fname]?.[lastT] ?? 0;
-    const norm = tensorData[lastT * meta.n_features + f];
-    console.log(`  ${fname}: raw=${raw} → norm=${norm.toFixed(6)}`);
+  // --- Build future precip tensor (n_stations * future_hours) ---
+  const futurePrecipTensor = new Float32Array(nStations * futureHours);
+  for (let s = 0; s < STATION_CODES.length; s++) {
+    const code = STATION_CODES[s];
+    const np_precip = normParams[`${code}_precip`];
+    const pf = stationData[code].precipFuture;
+    for (let h = 0; h < futureHours; h++) {
+      futurePrecipTensor[s * futureHours + h] = normalize(pf[h] ?? 0, np_precip?.min, np_precip?.max);
+    }
   }
-  // --- END DEBUG ---
 
-  // Dump tensor for cross-runtime comparison
-  const { writeFile } = await import('fs/promises');
-  const tensorPath = join(__dirname, '..', 'models', 'debug_tensor.json');
-  await writeFile(tensorPath, JSON.stringify(Array.from(tensorData)));
-  console.log(`\nTensor dumped → ${tensorPath} (${tensorData.length} floats)`);
-
+  // --- Run inference ---
   const ort = await import('onnxruntime-node');
-  const inputTensor = new ort.Tensor('float32', tensorData, [1, inputWindow, meta.n_features]);
-  const results = await session.run({ input: inputTensor });
+  const pastInput = new ort.Tensor('float32', pastTensor, [1, inputWindow, nFeaturesPadded]);
+  const futureInput = new ort.Tensor('float32', futurePrecipTensor, [1, nStations * futureHours]);
+  const results = await session.run({ past_input: pastInput, future_precip: futureInput });
   const predictions = results.predictions.data;
 
-  // Denormalize: predictions are normalized target (J706062001_h)
-  const targetNorm = normParams[`${meta.target_station}_h`];
-  const targetMin = targetNorm.min;
-  const targetMax = targetNorm.max;
+  // --- Denormalize predictions for all stations ---
+  const outputMap = meta.output_map;
+  const forecastHorizons = meta.forecast_horizons;
+  const allForecasts = {};
 
-  console.log(`\nRaw model output: [${Array.from(predictions).map(v => v.toFixed(6)).join(', ')}]`);
+  for (const code of STATION_CODES) {
+    const om = outputMap[code];
+    const np_h = normParams[`${code}_h`];
+    const hRange = (np_h?.max ?? 0) - (np_h?.min ?? 0);
+    const sd = stationData[code];
+    const lastHNorm = normalize(sd.h[inputWindow - 1] ?? 0, np_h?.min, np_h?.max);
 
-  const targetIsLog = logTransformCols.has(`${meta.target_station}_h`);
+    const hForecasts = forecastHorizons.map((h, j) => {
+      const delta = predictions[om.h_start + j];
+      const rawMm = (lastHNorm + delta) * hRange + (np_h?.min ?? 0);
+      const meters = rawMm / 1000;
+      const timestamp = new Date(lastHour.getTime() + h * 3600000);
+      return { t: timestamp.toISOString(), v: meters, horizon: `t+${h}h` };
+    });
 
-  // H normalisé au dernier timestep (pour delta denorm)
-  const lastHNorm = tensorData[(inputWindow - 1) * meta.n_features + targetHIdx];
+    const entry = { h: hForecasts };
 
-  const forecasts = meta.forecast_horizons.map((h, i) => {
-    let rawMm;
-    if (meta.target_mode === 'delta') {
-      rawMm = (lastHNorm + predictions[i]) * (targetMax - targetMin) + targetMin;
-    } else {
-      rawMm = predictions[i] * (targetMax - targetMin) + targetMin;
+    if (om.q_start != null) {
+      const np_q = normParams[`${code}_q`];
+      const qRange = (np_q?.max ?? 0) - (np_q?.min ?? 0);
+      const lastQNorm = normalize(sd.q[inputWindow - 1] ?? 0, np_q?.min, np_q?.max);
+
+      entry.q = forecastHorizons.map((h, j) => {
+        const delta = predictions[om.q_start + j];
+        const rawLs = (lastQNorm + delta) * qRange + (np_q?.min ?? 0);
+        const m3s = rawLs / 1000;
+        const timestamp = new Date(lastHour.getTime() + h * 3600000);
+        return { t: timestamp.toISOString(), v: m3s, horizon: `t+${h}h` };
+      });
     }
-    // If target was log-transformed, undo: expm1(log-space value) → mm
-    if (targetIsLog) rawMm = Math.expm1(rawMm);
-    const meters = rawMm / 1000;
-    const timestamp = new Date(lastHour.getTime() + h * 3600000);
-    console.log(`  ${`t+${h}h`.padEnd(5)}: norm=${predictions[i].toFixed(6)} → ${rawMm.toFixed(1)} mm → ${meters.toFixed(3)} m`);
-    return {
-      t: timestamp.toISOString(),
-      v: meters,
-      horizon: `t+${h}h`,
-    };
-  });
 
-  console.log('=== END DEBUG ===\n');
+    allForecasts[code] = entry;
+  }
 
-  return { forecasts, target_station: meta.target_station, model: 'tft' };
+  // Backward-compatible response: forecasts array for the requested station
+  const stationForecasts = allForecasts[stationId]?.h ?? allForecasts[STATION_CODES[0]]?.h ?? [];
+
+  console.log(`Forecast for ${stationId}:`, stationForecasts.map(f => `${f.horizon}: ${f.v.toFixed(3)}m`).join(', '));
+
+  return {
+    forecasts: stationForecasts,
+    target_station: stationId,
+    model: 'station_attn',
+    all_stations: allForecasts,
+  };
 }

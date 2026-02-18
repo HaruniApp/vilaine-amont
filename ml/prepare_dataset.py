@@ -4,14 +4,15 @@
 1. Charger les CSV bruts (H, Q, précipitations) pour les 11 stations
 2. Aligner sur un index horaire commun
 3. Interpoler les trous (linéaire, max 6h)
-4. Créer les features dérivées (dH/dt, dQ/dt, encodage temporel)
-5. Normaliser (min-max)
-6. Créer les fenêtres glissantes (input → multi-horizon output)
-7. Split chronologique train/val/test
+4. Créer les features dérivées (dH/dt, dQ/dt via différence centrale)
+5. Ajouter la feature release (lâché de barrage)
+6. Normaliser (P1/P99 robuste)
+7. Créer les fenêtres glissantes (input → multi-horizon multi-station output)
+8. Split chronologique train/val/test
 
 Usage:
     python prepare_dataset.py
-    python prepare_dataset.py --window 168 --target J706062001
+    python prepare_dataset.py --window 72
 """
 
 import argparse
@@ -22,20 +23,17 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import (
+    BARRAGE_CODES,
     DH_CLIP,
     DQ_CLIP,
     FORECAST_HORIZONS,
+    FUTURE_PRECIP_HOURS,
     INPUT_WINDOW_HOURS,
     PROCESSED_DIR,
-    PROPAGATION_HOURS,
     RAW_DIR,
-    RIVER_BRANCHES,
-    RIVER_DISTANCES_KM,
-    STATION_BRANCH,
     STATION_CODES,
     STATIONS,
     STATIONS_NO_Q,
-    TARGET_STATION,
     TRAIN_END,
     VAL_END,
 )
@@ -43,10 +41,8 @@ from config import (
 
 def load_raw_data() -> pd.DataFrame:
     """Charge et fusionne toutes les données brutes en un DataFrame unifié."""
-    # Index horaire commun
     all_timestamps = set()
 
-    # Charger d'abord pour trouver la plage
     station_data = {}
     for station in STATIONS:
         code = station["code"]
@@ -63,7 +59,6 @@ def load_raw_data() -> pd.DataFrame:
         precip_path = RAW_DIR / f"{code}_precip.csv"
         if precip_path.exists():
             df = pd.read_csv(precip_path, parse_dates=["timestamp"])
-            # Open-Meteo retourne des timestamps tz-aware, on les convertit en tz-naive
             if df["timestamp"].dt.tz is not None:
                 df["timestamp"] = df["timestamp"].dt.tz_localize(None)
             station_data[(code, "precip")] = df
@@ -72,7 +67,6 @@ def load_raw_data() -> pd.DataFrame:
     if not all_timestamps:
         raise ValueError("Aucune donnée brute trouvée dans data/raw/")
 
-    # Créer l'index horaire
     ts_min = min(all_timestamps)
     ts_max = max(all_timestamps)
     print(f"Plage temporelle : {ts_min} → {ts_max}")
@@ -80,7 +74,6 @@ def load_raw_data() -> pd.DataFrame:
     hourly_index = pd.date_range(ts_min, ts_max, freq="h")
     result = pd.DataFrame({"timestamp": hourly_index})
 
-    # Joindre chaque série
     for station in tqdm(STATIONS, desc="Fusion des stations"):
         code = station["code"]
 
@@ -90,7 +83,6 @@ def load_raw_data() -> pd.DataFrame:
             if key in station_data:
                 df = station_data[key].copy()
                 df["timestamp"] = df["timestamp"].dt.floor("h")
-                # Moyenne si plusieurs valeurs dans la même heure
                 df = df.groupby("timestamp")[var].mean().reset_index()
                 df.columns = ["timestamp", col_name]
                 result = result.merge(df, on="timestamp", how="left")
@@ -129,25 +121,33 @@ def drop_no_q_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute dH/dt, dQ/dt pour chaque station + encodage temporel."""
+    """Ajoute dH/dt, dQ/dt (différence centrale) pour chaque station."""
     for code in STATION_CODES:
         h_col = f"{code}_h"
         q_col = f"{code}_q"
 
         if h_col in df.columns:
-            df[f"{code}_dh"] = df[h_col].diff()
+            # Différence centrale : (H[t+1] - H[t-1]) / 2
+            df[f"{code}_dh"] = (df[h_col].shift(-1) - df[h_col].shift(1)) / 2.0
         if q_col in df.columns:
-            df[f"{code}_dq"] = df[q_col].diff()
+            df[f"{code}_dq"] = (df[q_col].shift(-1) - df[q_col].shift(1)) / 2.0
 
-    # Encodage temporel cyclique
-    hour = df["timestamp"].dt.hour + df["timestamp"].dt.minute / 60.0
-    day_of_year = df["timestamp"].dt.dayofyear
+    return df
 
-    df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
-    df["doy_sin"] = np.sin(2 * np.pi * day_of_year / 365.25)
-    df["doy_cos"] = np.cos(2 * np.pi * day_of_year / 365.25)
 
+def add_release_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Ajoute la feature de détection de lâché de barrage pour les 3 stations barrage."""
+    for code in BARRAGE_CODES:
+        dh_col = f"{code}_dh"
+        precip_col = f"{code}_precip"
+        if dh_col in df.columns and precip_col in df.columns:
+            dh = df[dh_col].fillna(0)
+            precip = df[precip_col].fillna(0)
+            # release = chute de H sans pluie → signal de lâché
+            # dH < 0 et precip ≈ 0 → release > 0
+            # dH < 0 et precip > 0 → release ≈ 0 (décrue naturelle)
+            # dH ≥ 0 → release = 0
+            df[f"{code}_release"] = (-dh).clip(lower=0) * (1 - precip.clip(upper=1))
     return df
 
 
@@ -164,91 +164,122 @@ def clip_outliers(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute les features de lag pour les stations amont (H décalé du temps de propagation)."""
-    for code, hours in PROPAGATION_HOURS.items():
-        if hours is None:
-            continue
-        h_col = f"{code}_h"
-        if h_col in df.columns:
-            lag_col = f"{code}_h_lag{hours}h"
-            df[lag_col] = df[h_col].shift(hours)
-    return df
-
-
-def add_static_spatial_features(df: pd.DataFrame, norm_params: dict) -> tuple[pd.DataFrame, dict]:
-    """Ajoute les features statiques de topologie (après normalisation).
-
-    Pour chaque station : distance normalisée, is_upstream, is_barrage, one-hot branche.
-    """
-    max_dist = max(abs(v) for v in RIVER_DISTANCES_KM.values())
-    barrage_codes = {s["code"] for s in STATIONS if s.get("barrage")}
-
-    n = len(df)
-    new_cols = {}
-    for code in STATION_CODES:
-        dist_norm = RIVER_DISTANCES_KM[code] / max_dist  # [-1, 1]
-        is_upstream = 1.0 if RIVER_DISTANCES_KM[code] > 0 else 0.0
-        is_barrage = 1.0 if code in barrage_codes else 0.0
-        branch = STATION_BRANCH[code]
-
-        new_cols[f"{code}_dist_to_target"] = np.full(n, dist_norm)
-        norm_params[f"{code}_dist_to_target"] = {"min": -1.0, "max": 1.0}
-
-        new_cols[f"{code}_is_upstream"] = np.full(n, is_upstream)
-        norm_params[f"{code}_is_upstream"] = {"min": 0.0, "max": 1.0}
-
-        new_cols[f"{code}_is_barrage"] = np.full(n, is_barrage)
-        norm_params[f"{code}_is_barrage"] = {"min": 0.0, "max": 1.0}
-
-        for b in RIVER_BRANCHES:
-            col = f"{code}_branch_{b}"
-            new_cols[col] = np.full(n, 1.0 if branch == b else 0.0)
-            norm_params[col] = {"min": 0.0, "max": 1.0}
-
-    df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
-    return df, norm_params
-
-
 def normalize_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Normalisation min-max. Retourne le df normalisé et les paramètres."""
+    """Normalisation robuste P1/P99. Retourne le df normalisé et les paramètres."""
     norm_params = {}
     numeric_cols = [c for c in df.columns if c != "timestamp"]
 
     for col in numeric_cols:
-        col_min = df[col].min()
-        col_max = df[col].max()
-        if col_max - col_min > 1e-8:
-            df[col] = (df[col] - col_min) / (col_max - col_min)
+        p1 = df[col].quantile(0.01)
+        p99 = df[col].quantile(0.99)
+        if p99 - p1 > 1e-8:
+            df[col] = (df[col] - p1) / (p99 - p1)
         else:
             df[col] = 0.0
-        norm_params[col] = {"min": float(col_min), "max": float(col_max)}
+        norm_params[col] = {"min": float(p1), "max": float(p99)}
 
     return df, norm_params
 
 
+def build_feature_order(df: pd.DataFrame) -> list[str]:
+    """Construit l'ordre des features : groupées par station.
+
+    Pour chaque station :
+    - Stations normales (avec Q) : h, q, precip, dh, dq
+    - Stations no_q sans barrage : h, precip, dh
+    - Stations barrage : h, precip, dh, release
+    """
+    feature_cols = []
+    for code in STATION_CODES:
+        feature_cols.append(f"{code}_h")
+        if code not in STATIONS_NO_Q:
+            feature_cols.append(f"{code}_q")
+        feature_cols.append(f"{code}_precip")
+        feature_cols.append(f"{code}_dh")
+        if code not in STATIONS_NO_Q:
+            feature_cols.append(f"{code}_dq")
+        if code in BARRAGE_CODES:
+            feature_cols.append(f"{code}_release")
+
+    # Vérifier que toutes les colonnes existent
+    available = set(df.columns) - {"timestamp"}
+    missing = [c for c in feature_cols if c not in available]
+    if missing:
+        print(f"    WARNING: colonnes manquantes: {missing}")
+    extra = available - set(feature_cols)
+    if extra:
+        print(f"    Colonnes ignorées: {sorted(extra)}")
+
+    return feature_cols
+
+
+def build_station_feature_map(feature_cols: list[str]) -> dict:
+    """Construit le mapping station → indices de features dans le vecteur."""
+    station_map = {}
+    for code in STATION_CODES:
+        indices = []
+        vars_list = []
+        for i, col in enumerate(feature_cols):
+            if col.startswith(f"{code}_"):
+                indices.append(i)
+                var = col[len(code) + 1:]  # strip "{code}_"
+                vars_list.append(var)
+        station_map[code] = {"indices": indices, "vars": vars_list}
+    return station_map
+
+
+def build_output_map() -> tuple[dict, int]:
+    """Construit le mapping station → indices dans le vecteur de sortie.
+
+    Ordre : pour chaque station, H×5 horizons, puis Q×5 si la station a Q.
+    Returns: (output_map, n_outputs)
+    """
+    output_map = {}
+    offset = 0
+    for code in STATION_CODES:
+        entry = {"h_start": offset, "h_end": offset + len(FORECAST_HORIZONS)}
+        offset += len(FORECAST_HORIZONS)
+        if code not in STATIONS_NO_Q:
+            entry["q_start"] = offset
+            entry["q_end"] = offset + len(FORECAST_HORIZONS)
+            offset += len(FORECAST_HORIZONS)
+        output_map[code] = entry
+    return output_map, offset
+
+
 def create_windows(
     df: pd.DataFrame,
-    target_station: str,
+    feature_cols: list[str],
     input_window: int,
     horizons: list[int],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    output_map: dict,
+    n_outputs: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Crée les fenêtres glissantes input→output.
 
     Returns:
-        X: (N, input_window, n_features) — séquences d'entrée
-        y: (N, len(horizons)) — hauteurs cibles aux horizons
+        X: (N, input_window, n_features) — séquences d'entrée passées
+        future_precip: (N, n_stations * future_hours) — précip futures
+        y: (N, n_outputs) — deltas H et Q pour toutes les stations
         timestamps: (N,) — timestamp du dernier pas de la fenêtre d'entrée
     """
-    feature_cols = [c for c in df.columns if c != "timestamp"]
-    target_col = f"{target_station}_h"
-
-    if target_col not in feature_cols:
-        raise ValueError(f"Colonne cible {target_col} introuvable")
-
     data = df[feature_cols].values
-    target_idx = feature_cols.index(target_col)
     timestamps = df["timestamp"].values
+    n_stations = len(STATION_CODES)
+
+    # Trouver les indices de précip dans feature_cols
+    precip_indices = []
+    for code in STATION_CODES:
+        pcol = f"{code}_precip"
+        precip_indices.append(feature_cols.index(pcol))
+
+    # Trouver les indices de H et Q pour le target
+    h_indices = {}
+    q_indices = {}
+    for code in STATION_CODES:
+        h_indices[code] = feature_cols.index(f"{code}_h")
+        if code not in STATIONS_NO_Q:
+            q_indices[code] = feature_cols.index(f"{code}_q")
 
     max_horizon = max(horizons)
     n_samples = len(df) - input_window - max_horizon
@@ -257,26 +288,64 @@ def create_windows(
         raise ValueError(f"Pas assez de données : {len(df)} lignes pour window={input_window}, max_horizon={max_horizon}")
 
     X = np.empty((n_samples, input_window, len(feature_cols)), dtype=np.float32)
-    y = np.empty((n_samples, len(horizons)), dtype=np.float32)
+    future_precip = np.empty((n_samples, n_stations * FUTURE_PRECIP_HOURS), dtype=np.float32)
+    y = np.empty((n_samples, n_outputs), dtype=np.float32)
     ts = np.empty(n_samples, dtype="datetime64[ns]")
 
     for i in tqdm(range(n_samples), desc="Fenêtrage", leave=False):
-        X[i] = data[i : i + input_window]
-        h_current = data[i + input_window - 1, target_idx]  # dernier pas de la fenêtre
-        for j, h in enumerate(horizons):
-            # Delta target : y = H_futur_norm - H_actuel_norm
-            y[i, j] = data[i + input_window + h - 1, target_idx] - h_current
-        ts[i] = timestamps[i + input_window - 1]
+        window_end = i + input_window  # index du premier pas après la fenêtre
+
+        # Séquence passée
+        X[i] = data[i:window_end]
+
+        # Précipitations futures : T+1 à T+FUTURE_PRECIP_HOURS
+        for s_idx, code in enumerate(STATION_CODES):
+            p_idx = precip_indices[s_idx]
+            for h in range(FUTURE_PRECIP_HOURS):
+                future_idx = window_end + h
+                if future_idx < len(data):
+                    future_precip[i, s_idx * FUTURE_PRECIP_HOURS + h] = data[future_idx, p_idx]
+                else:
+                    future_precip[i, s_idx * FUTURE_PRECIP_HOURS + h] = 0.0
+
+        # Multi-target : delta H et Q pour toutes les stations
+        for code in STATION_CODES:
+            h_idx = h_indices[code]
+            h_current = data[window_end - 1, h_idx]
+            om = output_map[code]
+
+            # Delta H
+            for j, horizon in enumerate(horizons):
+                target_idx = window_end + horizon - 1
+                if target_idx < len(data):
+                    y[i, om["h_start"] + j] = data[target_idx, h_idx] - h_current
+                else:
+                    y[i, om["h_start"] + j] = 0.0
+
+            # Delta Q (si applicable)
+            if code not in STATIONS_NO_Q:
+                q_idx = q_indices[code]
+                q_current = data[window_end - 1, q_idx]
+                for j, horizon in enumerate(horizons):
+                    target_idx = window_end + horizon - 1
+                    if target_idx < len(data):
+                        y[i, om["q_start"] + j] = data[target_idx, q_idx] - q_current
+                    else:
+                        y[i, om["q_start"] + j] = 0.0
+
+        ts[i] = timestamps[window_end - 1]
 
     # Remplacer les NaN restants par 0
     X = np.nan_to_num(X, nan=0.0)
+    future_precip = np.nan_to_num(future_precip, nan=0.0)
     y = np.nan_to_num(y, nan=0.0)
 
-    return X, y, ts
+    return X, future_precip, y, ts
 
 
 def split_by_date(
     X: np.ndarray,
+    future_precip: np.ndarray,
     y: np.ndarray,
     timestamps: np.ndarray,
     train_end: str,
@@ -289,10 +358,13 @@ def split_by_date(
 
     return {
         "X_train": X[train_mask],
-        "y_train": y[train_mask],
         "X_val": X[val_mask],
-        "y_val": y[val_mask],
         "X_test": X[test_mask],
+        "fp_train": future_precip[train_mask],
+        "fp_val": future_precip[val_mask],
+        "fp_test": future_precip[test_mask],
+        "y_train": y[train_mask],
+        "y_val": y[val_mask],
         "y_test": y[test_mask],
         "ts_train": timestamps[train_mask],
         "ts_val": timestamps[val_mask],
@@ -303,13 +375,12 @@ def split_by_date(
 def main():
     parser = argparse.ArgumentParser(description="Préparation du dataset")
     parser.add_argument("--window", type=int, default=INPUT_WINDOW_HOURS, help="Fenêtre d'entrée (heures)")
-    parser.add_argument("--target", default=TARGET_STATION, help="Station cible")
     args = parser.parse_args()
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Chargement
-    print("1/8 — Chargement des données brutes...")
+    print("1/7 — Chargement des données brutes...")
     df = load_raw_data()
     print(f"    {len(df)} lignes, {len(df.columns)} colonnes")
 
@@ -317,33 +388,32 @@ def main():
     df = drop_no_q_columns(df)
 
     # 2. Interpolation
-    print("2/8 — Interpolation des trous...")
+    print("2/7 — Interpolation des trous...")
     df = interpolate_gaps(df)
 
-    # 3. Features dérivées
-    print("3/8 — Création des features dérivées...")
+    # 3. Features dérivées (différence centrale)
+    print("3/7 — Création des features dérivées (différence centrale)...")
     df = add_derived_features(df)
 
     # 3b. Clipping des outliers sur dH/dt et dQ/dt
     df = clip_outliers(df)
 
-    # 4. Features de lag (stations amont)
-    print("4/8 — Ajout des features de lag...")
-    df = add_lag_features(df)
+    # 3c. Feature release (lâché de barrage)
+    print("    Ajout des features release (barrages)...")
+    df = add_release_features(df)
 
-    # Supprimer la première ligne (NaN du diff)
-    df = df.iloc[1:].reset_index(drop=True)
-    print(f"    {len(df.columns) - 1} features (avant static)")
+    # Supprimer les bords (NaN de la différence centrale)
+    df = df.iloc[1:-1].reset_index(drop=True)
 
-    # 5. Normalisation
-    print("5/8 — Normalisation min-max...")
+    # 4. Construire l'ordre des features
+    feature_cols = build_feature_order(df)
+    print(f"    {len(feature_cols)} features par pas de temps")
+
+    # 5. Normalisation P1/P99
+    print("4/7 — Normalisation P1/P99...")
     df, norm_params = normalize_features(df)
 
-    # 6. Features statiques spatiales (après normalisation, déjà en [0,1] ou [-1,1])
-    print("6/8 — Ajout des features statiques spatiales...")
-    df, norm_params = add_static_spatial_features(df, norm_params)
-
-    # Sauvegarder les paramètres de normalisation (NaN → null pour JSON valide)
+    # Sauvegarder les paramètres de normalisation
     norm_path = PROCESSED_DIR / "norm_params.json"
     clean_params = {}
     for k, v in norm_params.items():
@@ -356,36 +426,55 @@ def main():
     print(f"    Paramètres → {norm_path.name}")
 
     # Sauvegarder les noms de features
-    feature_cols = [c for c in df.columns if c != "timestamp"]
     features_path = PROCESSED_DIR / "feature_names.json"
     with open(features_path, "w") as f:
         json.dump(feature_cols, f, indent=2)
 
+    # 6. Construire output map
+    output_map, n_outputs = build_output_map()
+    print(f"    Output: {n_outputs} valeurs ({len(STATION_CODES)} stations × H + Q)")
+
     # 7. Fenêtrage
-    print(f"7/8 — Fenêtrage (window={args.window}h, horizons={FORECAST_HORIZONS}h)...")
-    X, y, timestamps = create_windows(df, args.target, args.window, FORECAST_HORIZONS)
-    print(f"    X: {X.shape}, y: {y.shape}")
+    print(f"5/7 — Fenêtrage (window={args.window}h, horizons={FORECAST_HORIZONS}h)...")
+    X, future_precip, y, timestamps = create_windows(
+        df, feature_cols, args.window, FORECAST_HORIZONS, output_map, n_outputs
+    )
+    print(f"    X: {X.shape}, future_precip: {future_precip.shape}, y: {y.shape}")
 
     # 8. Split
-    print(f"8/8 — Split chronologique (train≤{TRAIN_END}, val≤{VAL_END}, test=reste)...")
-    splits = split_by_date(X, y, timestamps, TRAIN_END, VAL_END)
+    print(f"6/7 — Split chronologique (train≤{TRAIN_END}, val≤{VAL_END}, test=reste)...")
+    splits = split_by_date(X, future_precip, y, timestamps, TRAIN_END, VAL_END)
 
     for name in ["train", "val", "test"]:
-        xk, yk = f"X_{name}", f"y_{name}"
-        print(f"    {name}: X={splits[xk].shape}, y={splits[yk].shape}")
+        xk, fpk, yk = f"X_{name}", f"fp_{name}", f"y_{name}"
+        print(f"    {name}: X={splits[xk].shape}, fp={splits[fpk].shape}, y={splits[yk].shape}")
         np.save(PROCESSED_DIR / f"X_{name}.npy", splits[xk])
+        np.save(PROCESSED_DIR / f"fp_{name}.npy", splits[fpk])
         np.save(PROCESSED_DIR / f"y_{name}.npy", splits[yk])
         np.save(PROCESSED_DIR / f"ts_{name}.npy", splits[f"ts_{name}"])
 
     # Sauvegarder les métadonnées
+    station_feature_map = build_station_feature_map(feature_cols)
+
+    # Vars per station pour le reshape dans le modèle
+    vars_per_station = {}
+    for code in STATION_CODES:
+        vars_per_station[code] = station_feature_map[code]["vars"]
+
     meta = {
-        "target_station": args.target,
         "input_window": args.window,
         "forecast_horizons": FORECAST_HORIZONS,
-        "n_features": X.shape[2],
+        "n_features": len(feature_cols),
+        "n_stations": len(STATION_CODES),
+        "n_outputs": n_outputs,
+        "future_precip_size": len(STATION_CODES) * FUTURE_PRECIP_HOURS,
+        "future_precip_hours": FUTURE_PRECIP_HOURS,
         "feature_names": feature_cols,
+        "station_codes": STATION_CODES,
+        "station_feature_map": station_feature_map,
+        "vars_per_station": vars_per_station,
+        "output_map": output_map,
         "target_mode": "delta",
-        "log_transform_cols": [],
         "train_end": TRAIN_END,
         "val_end": VAL_END,
         "shapes": {
@@ -398,6 +487,7 @@ def main():
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
+    print(f"\n7/7 — Métadonnées sauvegardées")
     print(f"\n✓ Dataset prêt dans {PROCESSED_DIR}")
 
 
