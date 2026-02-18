@@ -3,69 +3,65 @@ import uPlot from 'uplot';
 import { SolidUplot, createPluginBus } from '@dschz/solid-uplot';
 import { cursor, tooltip, focusSeries } from '@dschz/solid-uplot/plugins';
 
-function findNearestPrecip(precipData, ts) {
-  if (!precipData) return null;
-  const timestamps = precipData[0];
-  const past = precipData[1];
-  const future = precipData[2];
-  let bestIdx = -1;
-  let bestDist = Infinity;
-  for (let i = 0; i < timestamps.length; i++) {
-    const dist = Math.abs(timestamps[i] - ts);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestIdx = i;
-    }
-  }
-  if (bestIdx < 0 || bestDist > 3600) return null;
-  const val = past[bestIdx] ?? future[bestIdx] ?? null;
-  if (val == null) return null;
-  const isFuture = past[bestIdx] == null;
-  return { v: val, future: isFuture };
+function Tooltip(props) {
+  const idx = () => props.cursor.idx;
+  return (
+    <div style={{
+      background: "rgba(255,255,255,0.92)",
+      "backdrop-filter": "blur(8px)",
+      "-webkit-backdrop-filter": "blur(8px)",
+      padding: "10px 14px",
+      border: "none",
+      "border-radius": "12px",
+      "font-size": "13px",
+      "box-shadow": "0 4px 20px rgba(0,0,0,0.1)",
+    }}>
+      <div style={{ "margin-bottom": "4px", "font-weight": "bold" }}>
+        {new Date(props.cursor.xValue * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}
+      </div>
+      <For each={props.seriesData}>
+        {(series) => {
+          const value = () => props.u.data[series.seriesIdx]?.[idx()];
+          return (
+            <Show when={series.visible && value() != null && !series.label.startsWith("CI ")}>
+              <div style={{ color: series.stroke }}>
+                {series.label}: {value()?.toFixed(2)}
+              </div>
+            </Show>
+          );
+        }}
+      </For>
+    </div>
+  );
 }
 
-function createTooltip(getPrecipData) {
-  return function Tooltip(props) {
-    const idx = () => props.cursor.idx;
-    const precip = () => {
-      const i = idx();
-      const ts = i != null ? props.u.data[0]?.[i] : null;
-      return ts != null ? findNearestPrecip(getPrecipData(), ts) : null;
-    };
-    return (
-      <div style={{
-        background: "rgba(255,255,255,0.92)",
-        "backdrop-filter": "blur(8px)",
-        "-webkit-backdrop-filter": "blur(8px)",
-        padding: "10px 14px",
-        border: "none",
-        "border-radius": "12px",
-        "font-size": "13px",
-        "box-shadow": "0 4px 20px rgba(0,0,0,0.1)",
-      }}>
-        <div style={{ "margin-bottom": "4px", "font-weight": "bold" }}>
-          {new Date(props.cursor.xValue * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}
-        </div>
-        <For each={props.seriesData}>
-          {(series) => {
-            const value = () => props.u.data[series.seriesIdx]?.[idx()];
-            return (
-              <Show when={series.visible && value() != null && !series.label.startsWith("CI ")}>
-                <div style={{ color: series.stroke }}>
-                  {series.label}: {value()?.toFixed(2)}
-                </div>
-              </Show>
-            );
-          }}
-        </For>
-        <Show when={precip()}>
-          <div style={{ color: precip()?.future ? "#93c5fd" : "#60a5fa" }}>
-            Précip.{precip()?.future ? " (prév.)" : ""}: {precip()?.v?.toFixed(1)} mm/h
-          </div>
-        </Show>
-      </div>
-    );
-  };
+function PrecipTooltip(props) {
+  const idx = () => props.cursor.idx;
+  return (
+    <div style={{
+      background: "rgba(255,255,255,0.92)",
+      "backdrop-filter": "blur(8px)",
+      "-webkit-backdrop-filter": "blur(8px)",
+      padding: "8px 12px",
+      border: "none",
+      "border-radius": "10px",
+      "font-size": "13px",
+      "box-shadow": "0 4px 20px rgba(0,0,0,0.1)",
+    }}>
+      <For each={props.seriesData}>
+        {(series) => {
+          const value = () => props.u.data[series.seriesIdx]?.[idx()];
+          return (
+            <Show when={series.visible && value() != null}>
+              <div style={{ color: series.stroke }}>
+                {series.label}: {value()?.toFixed(1)} mm/h
+              </div>
+            </Show>
+          );
+        }}
+      </For>
+    </div>
+  );
 }
 
 function extractPoints(apiResponse) {
@@ -278,12 +274,10 @@ export default function HydroChart(props) {
     return d[0].length > 0;
   });
 
-  const TooltipWithPrecip = createTooltip(() => precipData());
-
   const plugins = [
     cursor(),
     focusSeries({ pxThreshold: 15 }),
-    tooltip(TooltipWithPrecip, { placement: "top-right", zIndex: 20 }),
+    tooltip(Tooltip, { placement: "top-right", zIndex: 20 }),
     createThresholdsPlugin(() => thresholds()),
   ];
 
@@ -424,7 +418,11 @@ export default function HydroChart(props) {
     },
   ];
 
-  const precipPlugins = [cursor()];
+  const precipPlugins = [
+    cursor(),
+    focusSeries({ pxThreshold: 15 }),
+    tooltip(PrecipTooltip, { placement: "top-right", zIndex: 20 }),
+  ];
 
   const axes = [
     {
