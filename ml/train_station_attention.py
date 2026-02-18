@@ -446,7 +446,18 @@ def main():
 
     results = {"model": "StationAttention", "val": {}, "test": {}}
 
-    for split_name, loader in [("val", val_loader), ("test", test_loader)]:
+    # Indices de H et Q dans X non-paddé (pour récupérer h_last, q_last)
+    h_feat_indices = {}
+    q_feat_indices = {}
+    for code in STATION_CODES:
+        sfm = meta["station_feature_map"][code]
+        for idx_raw, var in zip(sfm["indices"], sfm["vars"]):
+            if var == "h":
+                h_feat_indices[code] = idx_raw
+            elif var == "q":
+                q_feat_indices[code] = idx_raw
+
+    for split_name, loader, X_raw in [("val", val_loader, X_val), ("test", test_loader, X_test)]:
         all_preds, all_targets = [], []
         with torch.no_grad():
             for X_b, fp_b, y_b in loader:
@@ -459,20 +470,25 @@ def main():
 
         print(f"\n{split_name.upper()}:")
 
-        # Per-station metrics
+        # Per-station metrics (NSE sur valeurs absolues, comme l'ancien TFT)
         for code in STATION_CODES:
             om = meta["output_map"][code]
             np_h = norm_params[f"{code}_h"]
-            h_range = np_h["max"] - np_h["min"]
+            h_min, h_max = np_h["min"], np_h["max"]
+            h_range = h_max - h_min
+
+            # h_last normalisé au dernier pas de chaque fenêtre (X non-paddé)
+            h_last_norm = X_raw[:, -1, h_feat_indices[code]].numpy()
 
             for j, h in enumerate(FORECAST_HORIZONS):
                 idx = om["h_start"] + j
-                pred_mm = y_pred[:, idx] * h_range
-                true_mm = y_true[:, idx] * h_range
-                rmse = float(np.sqrt(np.mean((true_mm - pred_mm) ** 2)))
-                mae = float(np.mean(np.abs(true_mm - pred_mm)))
-                ss_res = np.sum((true_mm - pred_mm) ** 2)
-                ss_tot = np.sum((true_mm - np.mean(true_mm)) ** 2)
+                # Delta normalisé → valeur absolue en mm
+                pred_abs_mm = (h_last_norm + y_pred[:, idx]) * h_range + h_min
+                true_abs_mm = (h_last_norm + y_true[:, idx]) * h_range + h_min
+                rmse = float(np.sqrt(np.mean((true_abs_mm - pred_abs_mm) ** 2)))
+                mae = float(np.mean(np.abs(true_abs_mm - pred_abs_mm)))
+                ss_res = np.sum((true_abs_mm - pred_abs_mm) ** 2)
+                ss_tot = np.sum((true_abs_mm - np.mean(true_abs_mm)) ** 2)
                 nse = float(1 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
 
                 key = f"{code}_H_t+{h}h"
@@ -480,15 +496,18 @@ def main():
 
             if "q_start" in om:
                 np_q = norm_params[f"{code}_q"]
-                q_range = np_q["max"] - np_q["min"]
+                q_min, q_max = np_q["min"], np_q["max"]
+                q_range = q_max - q_min
+                q_last_norm = X_raw[:, -1, q_feat_indices[code]].numpy()
+
                 for j, h in enumerate(FORECAST_HORIZONS):
                     idx = om["q_start"] + j
-                    pred_ls = y_pred[:, idx] * q_range
-                    true_ls = y_true[:, idx] * q_range
-                    rmse = float(np.sqrt(np.mean((true_ls - pred_ls) ** 2)))
-                    mae = float(np.mean(np.abs(true_ls - pred_ls)))
-                    ss_res = np.sum((true_ls - pred_ls) ** 2)
-                    ss_tot = np.sum((true_ls - np.mean(true_ls)) ** 2)
+                    pred_abs_ls = (q_last_norm + y_pred[:, idx]) * q_range + q_min
+                    true_abs_ls = (q_last_norm + y_true[:, idx]) * q_range + q_min
+                    rmse = float(np.sqrt(np.mean((true_abs_ls - pred_abs_ls) ** 2)))
+                    mae = float(np.mean(np.abs(true_abs_ls - pred_abs_ls)))
+                    ss_res = np.sum((true_abs_ls - pred_abs_ls) ** 2)
+                    ss_tot = np.sum((true_abs_ls - np.mean(true_abs_ls)) ** 2)
                     nse = float(1 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
 
                     key = f"{code}_Q_t+{h}h"
