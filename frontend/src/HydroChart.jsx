@@ -3,36 +3,69 @@ import uPlot from 'uplot';
 import { SolidUplot, createPluginBus } from '@dschz/solid-uplot';
 import { cursor, tooltip, focusSeries } from '@dschz/solid-uplot/plugins';
 
-function Tooltip(props) {
-  const idx = () => props.cursor.idx;
-  return (
-    <div style={{
-      background: "rgba(255,255,255,0.92)",
-      "backdrop-filter": "blur(8px)",
-      "-webkit-backdrop-filter": "blur(8px)",
-      padding: "10px 14px",
-      border: "none",
-      "border-radius": "12px",
-      "font-size": "13px",
-      "box-shadow": "0 4px 20px rgba(0,0,0,0.1)",
-    }}>
-      <div style={{ "margin-bottom": "4px", "font-weight": "bold" }}>
-        {new Date(props.cursor.xValue * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}
+function findNearestPrecip(precipData, ts) {
+  if (!precipData) return null;
+  const timestamps = precipData[0];
+  const past = precipData[1];
+  const future = precipData[2];
+  let bestIdx = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < timestamps.length; i++) {
+    const dist = Math.abs(timestamps[i] - ts);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx < 0 || bestDist > 3600) return null;
+  const val = past[bestIdx] ?? future[bestIdx] ?? null;
+  if (val == null) return null;
+  const isFuture = past[bestIdx] == null;
+  return { v: val, future: isFuture };
+}
+
+function createTooltip(getPrecipData) {
+  return function Tooltip(props) {
+    const idx = () => props.cursor.idx;
+    const precip = () => {
+      const i = idx();
+      const ts = i != null ? props.u.data[0]?.[i] : null;
+      return ts != null ? findNearestPrecip(getPrecipData(), ts) : null;
+    };
+    return (
+      <div style={{
+        background: "rgba(255,255,255,0.92)",
+        "backdrop-filter": "blur(8px)",
+        "-webkit-backdrop-filter": "blur(8px)",
+        padding: "10px 14px",
+        border: "none",
+        "border-radius": "12px",
+        "font-size": "13px",
+        "box-shadow": "0 4px 20px rgba(0,0,0,0.1)",
+      }}>
+        <div style={{ "margin-bottom": "4px", "font-weight": "bold" }}>
+          {new Date(props.cursor.xValue * 1000).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}
+        </div>
+        <For each={props.seriesData}>
+          {(series) => {
+            const value = () => props.u.data[series.seriesIdx]?.[idx()];
+            return (
+              <Show when={series.visible && value() != null && !series.label.startsWith("CI ")}>
+                <div style={{ color: series.stroke }}>
+                  {series.label}: {value()?.toFixed(2)}
+                </div>
+              </Show>
+            );
+          }}
+        </For>
+        <Show when={precip()}>
+          <div style={{ color: precip()?.future ? "#93c5fd" : "#60a5fa" }}>
+            Précip.{precip()?.future ? " (prév.)" : ""}: {precip()?.v?.toFixed(1)} mm/h
+          </div>
+        </Show>
       </div>
-      <For each={props.seriesData}>
-        {(series) => {
-          const value = () => props.u.data[series.seriesIdx]?.[idx()];
-          return (
-            <Show when={series.visible && value() != null && !series.label.startsWith("CI ")}>
-              <div style={{ color: series.stroke }}>
-                {series.label}: {value()?.toFixed(2)}
-              </div>
-            </Show>
-          );
-        }}
-      </For>
-    </div>
-  );
+    );
+  };
 }
 
 function extractPoints(apiResponse) {
@@ -97,6 +130,51 @@ function createThresholdsPlugin(getThresholds) {
       ],
     },
   };
+}
+
+function buildPrecipData(forecast, mainTimestamps) {
+  if (!forecast?.precip?.length || !mainTimestamps?.length) return null;
+
+  const mainStart = mainTimestamps[0];
+  const mainEnd = mainTimestamps[mainTimestamps.length - 1];
+
+  const timestamps = [];
+  const valuesPast = [];
+  const valuesFuture = [];
+
+  for (const p of forecast.precip) {
+    const ts = Math.floor(new Date(p.t).getTime() / 1000);
+    if (ts < mainStart || ts > mainEnd) continue;
+    timestamps.push(ts);
+    valuesPast.push(p.v ?? 0);
+    valuesFuture.push(null);
+  }
+
+  if (forecast.precipFuture?.length) {
+    for (const p of forecast.precipFuture) {
+      const ts = Math.floor(new Date(p.t).getTime() / 1000);
+      if (ts > mainEnd) continue;
+      timestamps.push(ts);
+      valuesPast.push(null);
+      valuesFuture.push(p.v ?? 0);
+    }
+  }
+
+  if (timestamps.length === 0) return null;
+
+  // Pad to match main chart range exactly
+  if (timestamps[0] > mainStart) {
+    timestamps.unshift(mainStart);
+    valuesPast.unshift(null);
+    valuesFuture.unshift(null);
+  }
+  if (timestamps[timestamps.length - 1] < mainEnd) {
+    timestamps.push(mainEnd);
+    valuesPast.push(null);
+    valuesFuture.push(null);
+  }
+
+  return [timestamps, valuesPast, valuesFuture];
 }
 
 function buildData(dataH, dataQ, forecast) {
@@ -191,6 +269,7 @@ export default function HydroChart(props) {
   const bus = createPluginBus();
 
   const chartData = createMemo(() => buildData(props.dataH, props.dataQ, props.forecast));
+  const precipData = createMemo(() => buildPrecipData(props.forecast, chartData()[0]));
 
   const thresholds = createMemo(() => extractThresholds(props.dataH));
 
@@ -199,10 +278,12 @@ export default function HydroChart(props) {
     return d[0].length > 0;
   });
 
+  const TooltipWithPrecip = createTooltip(() => precipData());
+
   const plugins = [
     cursor(),
     focusSeries({ pxThreshold: 15 }),
-    tooltip(Tooltip, { placement: "top-right", zIndex: 20 }),
+    tooltip(TooltipWithPrecip, { placement: "top-right", zIndex: 20 }),
     createThresholdsPlugin(() => thresholds()),
   ];
 
@@ -288,6 +369,62 @@ export default function HydroChart(props) {
 
   const axisFont = '12px "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
   const axisLabelFont = '12px "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+  const yAxisSize = 60;
+
+  const precipBars = uPlot.paths.bars({ size: [0.8, Infinity, 1] });
+
+  const precipSeries = [
+    {},
+    {
+      label: "Précip. passée",
+      scale: "P",
+      fill: "rgba(96, 165, 250, 0.7)",
+      stroke: "rgba(96, 165, 250, 0.7)",
+      width: 0,
+      paths: precipBars,
+      points: { show: false },
+    },
+    {
+      label: "Précip. future",
+      scale: "P",
+      fill: "rgba(147, 197, 253, 0.5)",
+      stroke: "rgba(147, 197, 253, 0.5)",
+      width: 0,
+      paths: precipBars,
+      points: { show: false },
+    },
+  ];
+
+  const precipScales = {
+    x: { time: true },
+    P: { auto: true, range: (u, min, max) => [0, Math.max(max * 1.1, 0.5)] },
+  };
+
+  const precipAxes = [
+    { show: false },
+    {
+      scale: "P",
+      side: 3,
+      label: "mm/h",
+      labelFont: axisLabelFont,
+      font: axisFont,
+      stroke: "#60a5fa",
+      ticks: { stroke: "#e5e5ea", width: 1 },
+      grid: { show: true, stroke: "#f0f0f2", width: 1 },
+      size: yAxisSize,
+      values: (u, vals) => vals.map(v => v.toFixed(1)),
+    },
+    {
+      side: 1,
+      size: yAxisSize,
+      ticks: { show: false },
+      grid: { show: false },
+      values: () => [],
+      stroke: "transparent",
+    },
+  ];
+
+  const precipPlugins = [cursor()];
 
   const axes = [
     {
@@ -307,6 +444,7 @@ export default function HydroChart(props) {
     {
       scale: "H",
       side: 3,
+      size: yAxisSize,
       label: "Hauteur (m)",
       labelFont: axisLabelFont,
       font: axisFont,
@@ -318,6 +456,7 @@ export default function HydroChart(props) {
     {
       scale: "Q",
       side: 1,
+      size: yAxisSize,
       label: "Debit (m\u00b3/s)",
       labelFont: axisLabelFont,
       font: axisFont,
@@ -357,6 +496,21 @@ export default function HydroChart(props) {
           resetScales={true}
         />
       </div>
+      <Show when={precipData()}>
+        <div style={{ width: "100%", height: "100px", "margin-top": "0" }}>
+          <SolidUplot
+            data={precipData()}
+            series={precipSeries}
+            scales={precipScales}
+            axes={precipAxes}
+            tzDate={tzDate}
+            autoResize={true}
+            plugins={precipPlugins}
+            pluginBus={bus}
+            resetScales={true}
+          />
+        </div>
+      </Show>
       <Show when={thresholds()}>
         <div style={{ display: "flex", "flex-wrap": "wrap", "justify-content": "center", gap: "0.75rem 1.5rem", "margin-top": "0.5rem", "font-size": "12px" }}>
           <For each={thresholds()}>

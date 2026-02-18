@@ -114,7 +114,12 @@ export default function App() {
         // Extraire les prévisions H et Q de la station courante depuis all_stations
         const stationFc = json?.all_stations?.[stationId()];
         if (stationFc) {
-          setForecastData({ forecasts: stationFc.h, forecastsQ: stationFc.q || [] });
+          setForecastData({
+            forecasts: stationFc.h,
+            forecastsQ: stationFc.q || [],
+            precip: stationFc.precip || [],
+            precipFuture: stationFc.precipFuture || [],
+          });
         } else if (json?.forecasts?.length) {
           setForecastData(json);
         } else {

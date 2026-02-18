@@ -192,18 +192,25 @@ export async function forecast(stationId) {
   const inputWindow = meta.input_window; // 72
   const futureHours = meta.future_precip_hours; // 6
   const nStations = meta.n_stations; // 11
+  const forecastHorizons = meta.forecast_horizons;
+  const maxHorizon = Math.max(...forecastHorizons);
   const now = new Date();
   const lastHour = roundToHour(now);
   const startDate = new Date(lastHour.getTime() - (inputWindow + 1) * 3600000);
   const hourlyTimestamps = buildHourlyIndex(inputWindow, lastHour);
 
-  // Future timestamps for precip
+  // Future timestamps for model input (6h)
   const futureTimestamps = [];
   for (let h = 1; h <= futureHours; h++) {
     futureTimestamps.push(new Date(lastHour.getTime() + h * 3600000));
   }
-  // Combined timestamps for precip fetch (past + future)
-  const allPrecipTimestamps = [...hourlyTimestamps, ...futureTimestamps];
+  // Display future timestamps matching max forecast horizon (24h)
+  const displayFutureTimestamps = [];
+  for (let h = 1; h <= maxHorizon; h++) {
+    displayFutureTimestamps.push(new Date(lastHour.getTime() + h * 3600000));
+  }
+  // Combined timestamps for precip fetch (past + display future)
+  const allPrecipTimestamps = [...hourlyTimestamps, ...displayFutureTimestamps];
 
   const startStr = formatDateHydro(startDate);
   const endStr = formatDateHydro(now);
@@ -227,7 +234,7 @@ export async function forecast(stationId) {
   const precipResults = await Promise.all(
     STATION_CODES.map(code => {
       const { lat, lon } = STATION_COORDS[code];
-      return fetchPrecipitation(lat, lon, inputWindow + 2, futureHours + 1);
+      return fetchPrecipitation(lat, lon, inputWindow + 2, maxHorizon + 1);
     })
   );
 
@@ -240,8 +247,9 @@ export async function forecast(stationId) {
     const allPrecip = alignPrecipToGrid(precipResults[i], allPrecipTimestamps);
     const precipPast = allPrecip.slice(0, inputWindow);
     const precipFuture = allPrecip.slice(inputWindow, inputWindow + futureHours);
+    const precipFutureDisplay = allPrecip.slice(inputWindow, inputWindow + maxHorizon);
 
-    stationData[code] = { h: hArr, q: qArr, precip: precipPast, precipFuture };
+    stationData[code] = { h: hArr, q: qArr, precip: precipPast, precipFuture, precipFutureDisplay };
   }
 
   // Compute derivatives (central) + clip
@@ -317,7 +325,6 @@ export async function forecast(stationId) {
 
   // --- Denormalize predictions for all stations ---
   const outputMap = meta.output_map;
-  const forecastHorizons = meta.forecast_horizons;
   const rmseData = meta.rmse || {};
   const allForecasts = {};
 
@@ -364,6 +371,16 @@ export async function forecast(stationId) {
         return point;
       });
     }
+
+    // Raw precipitation data (mm/h) for chart display
+    entry.precip = hourlyTimestamps.map((ts, i) => ({
+      t: ts.toISOString(),
+      v: stationData[code].precip[i] ?? 0,
+    }));
+    entry.precipFuture = displayFutureTimestamps.map((ts, i) => ({
+      t: ts.toISOString(),
+      v: stationData[code].precipFutureDisplay[i] ?? 0,
+    }));
 
     allForecasts[code] = entry;
   }
