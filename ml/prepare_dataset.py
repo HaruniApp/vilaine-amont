@@ -22,6 +22,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import (
+    DH_CLIP,
+    DQ_CLIP,
     FORECAST_HORIZONS,
     INPUT_WINDOW_HOURS,
     PROCESSED_DIR,
@@ -146,6 +148,19 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     df["doy_sin"] = np.sin(2 * np.pi * day_of_year / 365.25)
     df["doy_cos"] = np.cos(2 * np.pi * day_of_year / 365.25)
 
+    return df
+
+
+def clip_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """Clip les outliers des features dérivées (dH/dt, dQ/dt)."""
+    dh_cols = [c for c in df.columns if c.endswith("_dh")]
+    dq_cols = [c for c in df.columns if c.endswith("_dq")]
+    for col in dh_cols:
+        df[col] = df[col].clip(-DH_CLIP, DH_CLIP)
+    for col in dq_cols:
+        df[col] = df[col].clip(-DQ_CLIP, DQ_CLIP)
+    clipped = len(dh_cols) + len(dq_cols)
+    print(f"    Clipping appliqué sur {clipped} colonnes (dH: ±{DH_CLIP}, dQ: ±{DQ_CLIP})")
     return df
 
 
@@ -308,6 +323,9 @@ def main():
     # 3. Features dérivées
     print("3/8 — Création des features dérivées...")
     df = add_derived_features(df)
+
+    # 3b. Clipping des outliers sur dH/dt et dQ/dt
+    df = clip_outliers(df)
 
     # 4. Features de lag (stations amont)
     print("4/8 — Ajout des features de lag...")

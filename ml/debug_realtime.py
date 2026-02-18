@@ -14,7 +14,7 @@ import numpy as np
 import requests
 import onnxruntime as ort
 
-from config import ONNX_DIR, PROCESSED_DIR, STATION_CODES, STATIONS, FORECAST_HORIZONS
+from config import DH_CLIP, DQ_CLIP, ONNX_DIR, PROCESSED_DIR, STATION_CODES, STATIONS, FORECAST_HORIZONS
 
 STATIONS_NO_Q = {s["code"] for s in STATIONS if s.get("barrage") or s.get("no_q")}
 STATION_COORDS = {s["code"]: (s["lat"], s["lon"]) for s in STATIONS}
@@ -208,6 +208,9 @@ def main():
             }
             station_data[code]["dh"] = compute_derivative(station_data[code]["h"])
             station_data[code]["dq"] = compute_derivative(station_data[code]["q"])
+            # Clip outliers pour cohérence avec l'entraînement
+            station_data[code]["dh"] = [max(-DH_CLIP, min(DH_CLIP, v)) if v is not None else None for v in station_data[code]["dh"]]
+            station_data[code]["dq"] = [max(-DQ_CLIP, min(DQ_CLIP, v)) if v is not None else None for v in station_data[code]["dq"]]
 
         # Temporal features (UTC, like fixed forecast.js)
         hour_sin, hour_cos, doy_sin, doy_cos = [], [], [], []

@@ -189,3 +189,7 @@ TARGET_STATION = "J706062001"  # Châteaubourg - Bel Air
 # --- API URLs ---
 HYDRO_BASE_URL = "https://www.hydro.eaufrance.fr/stationhydro/ajax/{station_id}/series"
 METEO_BASE_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+# --- Clipping des outliers sur les features dérivées ---
+DH_CLIP = 100    # ±100 mm/h (variation max réaliste pour dH/dt)
+DQ_CLIP = 2000   # ±2000 L/s/h (variation max réaliste pour dQ/dt)

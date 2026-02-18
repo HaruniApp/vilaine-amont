@@ -276,10 +276,13 @@ export async function forecast(stationId) {
     }
   }
 
-  // Compute derivatives (on log-transformed values)
+  // Compute derivatives (on log-transformed values) + clip outliers
+  const DH_CLIP = 100, DQ_CLIP = 2000;
   for (const code of STATION_CODES) {
-    stationData[code].dh = computeDerivative(stationData[code].h);
-    stationData[code].dq = computeDerivative(stationData[code].q);
+    stationData[code].dh = computeDerivative(stationData[code].h)
+      .map(v => v == null ? null : Math.max(-DH_CLIP, Math.min(DH_CLIP, v)));
+    stationData[code].dq = computeDerivative(stationData[code].q)
+      .map(v => v == null ? null : Math.max(-DQ_CLIP, Math.min(DQ_CLIP, v)));
   }
 
   // Compute temporal features
