@@ -25,6 +25,15 @@ def nash_sutcliffe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 1.0 - ss_res / ss_tot
 
 
+def _normalize_keys(metrics: dict) -> dict:
+    """Normalise les clés rmse_mm/mae_mm → rmse/mae."""
+    return {
+        "rmse": metrics.get("rmse") or metrics.get("rmse_mm", 0),
+        "mae": metrics.get("mae") or metrics.get("mae_mm", 0),
+        "nse": metrics["nse"],
+    }
+
+
 def _norm_to_mm(metrics: dict, t_range: float) -> dict:
     """Convertit les RMSE/MAE normalisées en mm."""
     return {
@@ -78,7 +87,10 @@ def load_results() -> dict:
             data = json.load(f)
         results["TFT"] = {}
         for k in data.get("test", {}):
-            results["TFT"][k] = {"val": data["val"][k], "test": data["test"][k]}
+            results["TFT"][k] = {
+                "val": _normalize_keys(data["val"][k]),
+                "test": _normalize_keys(data["test"][k]),
+            }
 
     return results
 
