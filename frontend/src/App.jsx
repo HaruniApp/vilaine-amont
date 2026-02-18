@@ -105,20 +105,26 @@ export default function App() {
       setLoading(false);
     }
 
-    // Phase 2 : prévisions en background (uniquement Chateaubourg)
-    if (stationId() === 'J706062001') {
-      setForecastLoading(true);
-      try {
-        const res = await fetch(`/api/station/${stationId()}/forecast`);
-        if (res.ok) {
-          const json = await res.json();
-          setForecastData(json?.forecasts?.length ? json : null);
+    // Phase 2 : prévisions en background (toutes les stations)
+    setForecastLoading(true);
+    try {
+      const res = await fetch(`/api/station/${stationId()}/forecast`);
+      if (res.ok) {
+        const json = await res.json();
+        // Extraire les prévisions H et Q de la station courante depuis all_stations
+        const stationFc = json?.all_stations?.[stationId()];
+        if (stationFc) {
+          setForecastData({ forecasts: stationFc.h, forecastsQ: stationFc.q || [] });
+        } else if (json?.forecasts?.length) {
+          setForecastData(json);
+        } else {
+          setForecastData(null);
         }
-      } catch {
-        // silencieux
-      } finally {
-        setForecastLoading(false);
       }
+    } catch {
+      // silencieux
+    } finally {
+      setForecastLoading(false);
     }
   }
 

@@ -134,15 +134,28 @@ function buildData(dataH, dataQ, forecast) {
     }
   }
 
-  // Build forecast series
-  const valuesForecast = new Array(timestamps.length).fill(null);
+  // Build forecast series (H + Q)
+  const valuesForecastH = new Array(timestamps.length).fill(null);
+  const valuesForecastQ = new Array(timestamps.length).fill(null);
 
   if (forecast?.forecasts?.length && timestamps.length > 0) {
-    // Start with the last observed H value for visual continuity
+    // Start with the last observed values for visual continuity
     const lastHVal = valuesH[valuesH.length - 1];
-    const lastHTs = timestamps[timestamps.length - 1];
     if (lastHVal != null) {
-      valuesForecast[valuesForecast.length - 1] = lastHVal;
+      valuesForecastH[valuesForecastH.length - 1] = lastHVal;
+    }
+    const lastQVal = valuesQ[valuesQ.length - 1];
+    if (lastQVal != null) {
+      valuesForecastQ[valuesForecastQ.length - 1] = lastQVal;
+    }
+
+    // Build Q forecast map
+    const qForecastMap = new Map();
+    if (forecast.forecastsQ?.length) {
+      for (const f of forecast.forecastsQ) {
+        const ts = Math.floor(new Date(f.t).getTime() / 1000);
+        qForecastMap.set(ts, f.v);
+      }
     }
 
     // Add forecast points at future timestamps
@@ -151,11 +164,12 @@ function buildData(dataH, dataQ, forecast) {
       timestamps.push(ts);
       valuesH.push(null);
       valuesQ.push(null);
-      valuesForecast.push(f.v);
+      valuesForecastH.push(f.v);
+      valuesForecastQ.push(qForecastMap.get(ts) ?? null);
     }
   }
 
-  return [timestamps, valuesH, valuesQ, valuesForecast];
+  return [timestamps, valuesH, valuesQ, valuesForecastH, valuesForecastQ];
 }
 
 export default function HydroChart(props) {
@@ -193,11 +207,19 @@ export default function HydroChart(props) {
       scale: "Q",
     },
     {
-      label: "Prediction H (m)",
+      label: "Prévision H (m)",
       stroke: "#0d9488",
       width: 2,
       dash: [6, 4],
       scale: "H",
+      value: (u, v) => v == null ? "--" : v.toFixed(2),
+    },
+    {
+      label: "Prévision Q (m\u00b3/s)",
+      stroke: "#d97706",
+      width: 2,
+      dash: [6, 4],
+      scale: "Q",
       value: (u, v) => v == null ? "--" : v.toFixed(2),
     },
   ];
