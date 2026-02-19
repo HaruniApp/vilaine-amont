@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Projet
 
-Vigicrue — Visualisation et prédiction des hauteurs d'eau et débits des stations hydrométriques françaises via les données ouvertes de [Hydro EauFrance](https://www.hydro.eaufrance.fr), avec un modèle ML de prévision de crues.
+Bassin Vilaine Amont — Visualisation et prédiction des hauteurs d'eau et débits des 11 stations hydrométriques du bassin Vilaine Amont via les données ouvertes de [Hydro EauFrance](https://www.hydro.eaufrance.fr), avec un modèle ML de prévision de crues.
 
 ## Commandes
 
@@ -27,7 +27,7 @@ Pas de tests, pas de linter configurés.
 
 Architecture de production :
 ```
-Browser → nginx (vigicrue.haruni.net:443)
+Browser → nginx (vilaine-amont.haruni.net:443)
               ├── / → fichiers statiques (frontend/dist/)
               └── /api → proxy_pass → localhost:3001 (Express via pm2)
 ```
@@ -39,9 +39,9 @@ npm -C frontend run build
 # Lancer le backend avec pm2
 pm2 start ecosystem.config.cjs
 
-# Copier la config nginx (adapter le chemin root dans vigicrue.conf d'abord)
-sudo cp nginx/vigicrue.conf /etc/nginx/sites-available/vigicrue
-sudo ln -s /etc/nginx/sites-available/vigicrue /etc/nginx/sites-enabled/
+# Copier la config nginx
+sudo cp nginx/vilaine-amont.conf /etc/nginx/sites-available/vilaine-amont
+sudo ln -s /etc/nginx/sites-available/vilaine-amont /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
