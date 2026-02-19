@@ -126,9 +126,9 @@ FORECAST_HORIZONS = list(range(1, 25))  # horizons de prédiction : [1, 2, ..., 
 FUTURE_PRECIP_HOURS = 24               # heures de précipitations futures
 
 # --- Paramètres d'entraînement ---
-TRAIN_END = "2023-12-31"
-VAL_END = "2024-12-31"
-# Test = tout ce qui reste (inclut la crue de janvier 2025)
+TRAIN_END = "2025-06-30"
+VAL_END = "2025-12-31"
+# Test = 2026-01-01 → aujourd'hui (hiver 2025-2026)
 
 BATCH_SIZE = 256
 LEARNING_RATE = 1e-3
