@@ -3,10 +3,10 @@
 Architecture :
   Per-station LSTM (partagé) → Cross-station Attention → Shared Decoder (H + Q)
 
-Input passé:  (batch, 72, 54)  → reshape → 11 stations × (batch, 72, 5)
-Input futur:  (batch, 66)      → reshape → 11 stations × (batch, 6)
+Input passé:  (batch, 72, n_features)  → reshape → 11 stations × (batch, 72, 7)
+Input futur:  (batch, n_stations * future_hours)
 
-Output: (batch, 90)  → 11 stations × 5 horizons H + 7 stations × 5 horizons Q
+Output: (batch, n_outputs)  → 11 stations × 24 horizons H + 7 stations × 24 horizons Q
 
 Usage:
     python train_station_attention.py
@@ -36,16 +36,16 @@ from config import (
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # Nombre de variables d'entrée par station (uniforme après padding)
-VARS_PER_STATION = 5
+VARS_PER_STATION = 7
 
 
 class StationAttentionModel(nn.Module):
     """Per-station LSTM → Cross-station Attention → Shared Decoder.
 
-    Chaque station a 5 variables d'entrée :
-    - Stations normales : H, Q, precip, dH, dQ
-    - Stations no_q (Taillis) : H, 0, precip, dH, 0
-    - Stations barrage : H, 0, precip, dH, release
+    Chaque station a 7 variables d'entrée :
+    - Stations normales : H, Q, precip, dH, dQ, soil_moisture_0_to_7cm, soil_moisture_0_to_28cm
+    - Stations no_q (Taillis) : H, 0, precip, dH, 0, soil_moisture_0_to_7cm, soil_moisture_0_to_28cm
+    - Stations barrage : H, 0, precip, dH, release, soil_moisture_0_to_7cm, soil_moisture_0_to_28cm
     """
 
     def __init__(
@@ -293,7 +293,7 @@ def main():
     # Mais nos features ne sont PAS uniformes (certaines stations ont 3, 4 ou 5 vars).
     # On doit padder pour uniformiser à VARS_PER_STATION = 5 vars/station.
     def pad_features(X_tensor):
-        """Pad X de (batch, seq, n_features_raw) à (batch, seq, n_stations * 5)."""
+        """Pad X de (batch, seq, n_features_raw) à (batch, seq, n_stations * 7)."""
         batch_size, seq_len, _ = X_tensor.shape
         padded = torch.zeros(batch_size, seq_len, n_stations * VARS_PER_STATION, dtype=X_tensor.dtype)
 
@@ -303,8 +303,11 @@ def main():
             src_vars = sfm["vars"]
 
             # Mapping des vars source vers slots de destination
-            # Slots: 0=h, 1=q, 2=precip, 3=dh, 4=dq/release
-            slot_map = {"h": 0, "q": 1, "precip": 2, "dh": 3, "dq": 4, "release": 4}
+            # Slots: 0=h, 1=q, 2=precip, 3=dh, 4=dq/release, 5=soil_moisture_0_to_7cm, 6=soil_moisture_0_to_28cm
+            slot_map = {
+                "h": 0, "q": 1, "precip": 2, "dh": 3, "dq": 4, "release": 4,
+                "soil_moisture_0_to_7cm": 5, "soil_moisture_0_to_28cm": 6,
+            }
             dst_base = s_idx * VARS_PER_STATION
 
             for src_i, var_name in zip(src_indices, src_vars):
@@ -314,7 +317,7 @@ def main():
 
         return padded
 
-    print("\nPadding des features pour uniformiser à 5 vars/station...")
+    print("\nPadding des features pour uniformiser à 7 vars/station...")
     X_train_pad = pad_features(X_train)
     X_val_pad = pad_features(X_val)
     X_test_pad = pad_features(X_test)

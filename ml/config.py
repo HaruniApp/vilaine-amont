@@ -122,7 +122,7 @@ COLLECT_END_DATE = date.today().strftime("%Y-%m-%d")
 
 # --- Paramètres du dataset ---
 INPUT_WINDOW_HOURS = 72       # fenêtre d'entrée par défaut (heures)
-FORECAST_HORIZONS = [1, 3, 6, 12, 24]  # horizons de prédiction (heures)
+FORECAST_HORIZONS = list(range(1, 25))  # horizons de prédiction : [1, 2, ..., 24]h
 FUTURE_PRECIP_HOURS = 24               # heures de précipitations futures
 
 # --- Paramètres d'entraînement ---

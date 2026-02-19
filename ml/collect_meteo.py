@@ -1,4 +1,9 @@
-"""Collecte des précipitations horaires depuis Open-Meteo Historical Weather API.
+"""Collecte des données météo horaires depuis Open-Meteo Historical Weather API.
+
+Variables collectées :
+- precipitation (mm/h)
+- soil_moisture_0_to_7cm (m³/m³)
+- soil_moisture_0_to_28cm (m³/m³)
 
 Open-Meteo accepte des plages longues (plusieurs années) en une seule requête,
 mais on découpe en segments annuels pour fiabilité.
@@ -32,15 +37,28 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5
 REQUEST_DELAY = 0.5  # Open-Meteo est généreux mais restons polis
 
+METEO_VARIABLES = ["precipitation", "soil_moisture_0_to_7cm", "soil_moisture_0_to_28cm"]
 
-def fetch_precipitation(lat: float, lon: float, start: str, end: str) -> pd.DataFrame | None:
-    """Récupère les précipitations horaires pour un point géographique."""
+# Mapping variable → suffixe de fichier CSV
+CSV_SUFFIXES = {
+    "precipitation": "precip",
+    "soil_moisture_0_to_7cm": "soil_moisture_0_to_7cm",
+    "soil_moisture_0_to_28cm": "soil_moisture_0_to_28cm",
+}
+
+
+def fetch_meteo(lat: float, lon: float, start: str, end: str) -> dict[str, pd.DataFrame] | None:
+    """Récupère les variables météo horaires pour un point géographique.
+
+    Returns:
+        Dict mapping variable name → DataFrame with (timestamp, value) columns.
+    """
     params = {
         "latitude": lat,
         "longitude": lon,
         "start_date": start,
         "end_date": end,
-        "hourly": "precipitation",
+        "hourly": ",".join(METEO_VARIABLES),
         "timezone": "Europe/Paris",
     }
 
@@ -52,13 +70,18 @@ def fetch_precipitation(lat: float, lon: float, start: str, end: str) -> pd.Data
 
             hourly = data.get("hourly", {})
             times = hourly.get("time", [])
-            precip = hourly.get("precipitation", [])
 
             if not times:
                 return None
 
-            df = pd.DataFrame({"timestamp": pd.to_datetime(times), "precipitation": precip})
-            return df
+            result = {}
+            timestamps = pd.to_datetime(times)
+            for var in METEO_VARIABLES:
+                values = hourly.get(var, [])
+                if values:
+                    result[var] = pd.DataFrame({"timestamp": timestamps, var: values})
+
+            return result if result else None
 
         except (requests.RequestException, ValueError) as e:
             if attempt < MAX_RETRIES - 1:
@@ -97,62 +120,70 @@ def get_last_timestamp(csv_path) -> str | None:
 
 
 def collect_station_meteo(station: dict, start_date: str, end_date: str, full: bool = False) -> None:
-    """Collecte les précipitations pour une station."""
+    """Collecte les variables météo pour une station."""
     code = station["code"]
     label = station["label"]
     lat, lon = station["lat"], station["lon"]
 
-    out_path = RAW_DIR / f"{code}_precip.csv"
-    existing_df = None
+    # Determine effective start date from existing CSVs (incremental mode)
+    csv_paths = {var: RAW_DIR / f"{code}_{CSV_SUFFIXES[var]}.csv" for var in METEO_VARIABLES}
+    existing_dfs = {}
     effective_start = start_date
 
-    # Mode incrémental
     if not full:
-        last_ts = get_last_timestamp(out_path)
-        if last_ts is not None:
-            if last_ts >= end_date:
+        # Find the earliest "last timestamp" across all variable CSVs
+        last_timestamps = []
+        for var in METEO_VARIABLES:
+            last_ts = get_last_timestamp(csv_paths[var])
+            if last_ts is not None:
+                last_timestamps.append(last_ts)
+                existing_dfs[var] = pd.read_csv(csv_paths[var], parse_dates=["timestamp"])
+
+        if last_timestamps:
+            # Use the earliest last_ts to ensure all variables are up to date
+            earliest_last = min(last_timestamps)
+            if earliest_last >= end_date:
                 print(f"\n  {label} ({code}) — déjà à jour, skip")
                 return
-            effective_start = last_ts
-            existing_df = pd.read_csv(out_path, parse_dates=["timestamp"])
-            print(f"\n  {label} ({code}) — incrémental depuis {last_ts}")
+            effective_start = earliest_last
+            print(f"\n  {label} ({code}) — incrémental depuis {earliest_last}")
         else:
             print(f"\n  {label} ({code}) — lat={lat}, lon={lon}")
     else:
         print(f"\n  {label} ({code}) — lat={lat}, lon={lon}")
 
     ranges = generate_yearly_ranges(effective_start, end_date)
-    all_dfs = []
+    all_dfs = {var: [] for var in METEO_VARIABLES}
 
     for seg_start, seg_end in tqdm(ranges, desc=f"  {code}", leave=False):
-        df = fetch_precipitation(lat, lon, seg_start, seg_end)
-        if df is not None:
-            all_dfs.append(df)
+        result = fetch_meteo(lat, lon, seg_start, seg_end)
+        if result is not None:
+            for var in METEO_VARIABLES:
+                if var in result:
+                    all_dfs[var].append(result[var])
         time.sleep(REQUEST_DELAY)
 
-    if not all_dfs and existing_df is None:
-        print(f"  ⚠ Aucune donnée météo pour {code}")
-        return
+    for var in METEO_VARIABLES:
+        new_df = pd.concat(all_dfs[var], ignore_index=True) if all_dfs[var] else pd.DataFrame()
+        existing_df = existing_dfs.get(var)
 
-    new_df = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+        if existing_df is not None and not new_df.empty:
+            df = pd.concat([existing_df, new_df], ignore_index=True)
+        elif existing_df is not None:
+            df = existing_df
+        elif not new_df.empty:
+            df = new_df
+        else:
+            print(f"  ⚠ Aucune donnée {var} pour {code}")
+            continue
 
-    # Fusionner avec les données existantes
-    if existing_df is not None and not new_df.empty:
-        df = pd.concat([existing_df, new_df], ignore_index=True)
-    elif existing_df is not None:
-        df = existing_df
-    else:
-        df = new_df
-
-    df = df.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
-
-    df.to_csv(out_path, index=False)
-    print(f"  ✓ {len(df)} points → {out_path.name}")
-    print(f"    Plage: {df['timestamp'].min()} → {df['timestamp'].max()}")
+        df = df.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+        df.to_csv(csv_paths[var], index=False)
+        print(f"  ✓ {var}: {len(df)} points → {csv_paths[var].name}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collecte des précipitations Open-Meteo")
+    parser = argparse.ArgumentParser(description="Collecte des données météo Open-Meteo")
     parser.add_argument("--start", default=COLLECT_START_DATE, help="Date de début (YYYY-MM-DD)")
     parser.add_argument("--end", default=COLLECT_END_DATE, help="Date de fin (YYYY-MM-DD)")
     parser.add_argument("--full", action="store_true", help="Collecte complète (ignore les CSV existants)")
@@ -162,6 +193,7 @@ def main():
 
     mode = "complète" if args.full else "incrémentale"
     print(f"Collecte Open-Meteo ({mode}) : {args.start} → {args.end}")
+    print(f"Variables : {', '.join(METEO_VARIABLES)}")
     print(f"Stations : {len(STATIONS)}")
 
     for station in STATIONS:

@@ -26,7 +26,7 @@ from config import (
 STATIONS_NO_Q = {s["code"] for s in STATIONS if s.get("barrage") or s.get("no_q")}
 STATION_COORDS = {s["code"]: (s["lat"], s["lon"]) for s in STATIONS}
 
-VARS_PER_STATION = 5
+VARS_PER_STATION = 7
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -60,19 +60,28 @@ def fetch_hydro(station_id, start_str, end_str, variable):
         return []
 
 
-def fetch_precip(lat, lon, past_hours, forecast_hours):
+def fetch_meteo(lat, lon, past_hours, forecast_hours):
+    """Fetch precipitation and soil moisture from Open-Meteo forecast API."""
     url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
            f"&past_hours={past_hours}&forecast_hours={forecast_hours}"
-           f"&hourly=precipitation&timezone=Europe%2FParis")
+           f"&hourly=precipitation,soil_moisture_0_to_7cm,soil_moisture_0_to_28cm"
+           f"&timezone=Europe%2FParis")
     try:
         resp = requests.get(url, timeout=30)
         data = resp.json()
-        times = data.get("hourly", {}).get("time", [])
-        precip = data.get("hourly", {}).get("precipitation", [])
-        return [{"t": t, "v": precip[i] if i < len(precip) else 0} for i, t in enumerate(times)]
+        hourly = data.get("hourly", {})
+        times = hourly.get("time", [])
+        precip = hourly.get("precipitation", [])
+        soil_7cm = hourly.get("soil_moisture_0_to_7cm", [])
+        soil_28cm = hourly.get("soil_moisture_0_to_28cm", [])
+        return {
+            "precip": [{"t": t, "v": precip[i] if i < len(precip) else 0} for i, t in enumerate(times)],
+            "soil_moisture_0_to_7cm": [{"t": t, "v": soil_7cm[i] if i < len(soil_7cm) else 0} for i, t in enumerate(times)],
+            "soil_moisture_0_to_28cm": [{"t": t, "v": soil_28cm[i] if i < len(soil_28cm) else 0} for i, t in enumerate(times)],
+        }
     except Exception as e:
-        print(f"  Precip ({lat},{lon}): {e}")
-        return []
+        print(f"  Meteo ({lat},{lon}): {e}")
+        return {"precip": [], "soil_moisture_0_to_7cm": [], "soil_moisture_0_to_28cm": []}
 
 
 def round_to_hour(dt):
@@ -171,22 +180,31 @@ def main():
         else:
             hydro_raw[(code, "Q")] = []
 
-    # Fetch precip (past + future)
-    print("\nFetching precipitation (past + forecast)...")
-    precip_raw = {}
+    # Fetch meteo (precip + soil moisture, past + future)
+    print("\nFetching meteo (precip + soil moisture, past + forecast)...")
+    meteo_raw = {}
     for code in STATION_CODES:
         lat, lon = STATION_COORDS[code]
-        precip_raw[code] = fetch_precip(lat, lon, input_window + 2, future_hours + 1)
+        meteo_raw[code] = fetch_meteo(lat, lon, input_window + 2, future_hours + 1)
 
     # Organize data
     station_data = {}
     for code in STATION_CODES:
         h_arr = align_hydro(hydro_raw[(code, "H")], hourly_ts)
         q_arr = align_hydro(hydro_raw[(code, "Q")], hourly_ts)
-        all_precip = align_precip(precip_raw[code], all_precip_ts)
+        all_precip = align_precip(meteo_raw[code]["precip"], all_precip_ts)
         precip_past = all_precip[:input_window]
         precip_future = all_precip[input_window:input_window + future_hours]
-        station_data[code] = {"h": h_arr, "q": q_arr, "precip": precip_past, "precip_future": precip_future}
+
+        all_soil_7cm = align_precip(meteo_raw[code]["soil_moisture_0_to_7cm"], all_precip_ts)
+        all_soil_28cm = align_precip(meteo_raw[code]["soil_moisture_0_to_28cm"], all_precip_ts)
+        soil_7cm_past = all_soil_7cm[:input_window]
+        soil_28cm_past = all_soil_28cm[:input_window]
+
+        station_data[code] = {
+            "h": h_arr, "q": q_arr, "precip": precip_past, "precip_future": precip_future,
+            "soil_moisture_0_to_7cm": soil_7cm_past, "soil_moisture_0_to_28cm": soil_28cm_past,
+        }
 
     # Derivatives (central) + clip
     for code in STATION_CODES:
@@ -226,6 +244,12 @@ def main():
             elif code in BARRAGE_CODES:
                 np_release = norm_params.get(f"{code}_release", {})
                 past_tensor[0, t, base + 4] = normalize(sd.get("release", [0]*input_window)[t], np_release.get("min"), np_release.get("max"))
+
+            # Soil moisture (slots 5 and 6)
+            np_soil7 = norm_params.get(f"{code}_soil_moisture_0_to_7cm", {})
+            np_soil28 = norm_params.get(f"{code}_soil_moisture_0_to_28cm", {})
+            past_tensor[0, t, base + 5] = normalize(sd["soil_moisture_0_to_7cm"][t] or 0, np_soil7.get("min"), np_soil7.get("max"))
+            past_tensor[0, t, base + 6] = normalize(sd["soil_moisture_0_to_28cm"][t] or 0, np_soil28.get("min"), np_soil28.get("max"))
 
     # --- Build future precip tensor ---
     future_precip_tensor = np.zeros((1, n_stations * future_hours), dtype=np.float32)

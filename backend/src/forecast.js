@@ -40,7 +40,7 @@ const DH_CLIP = 100;
 const DQ_CLIP = 2000;
 
 // Vars per station (padded, uniform)
-const VARS_PER_STATION = 5;
+const VARS_PER_STATION = 7;
 
 let session = null;
 let meta = null;
@@ -101,13 +101,19 @@ async function fetchHydroSeries(stationId, startAt, endAt, variable) {
   }
 }
 
-async function fetchPrecipitation(lat, lon, pastHours, forecastHours) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&past_hours=${pastHours}&forecast_hours=${forecastHours}&hourly=precipitation&timezone=Europe%2FParis`;
+async function fetchMeteo(lat, lon, pastHours, forecastHours) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&past_hours=${pastHours}&forecast_hours=${forecastHours}&hourly=precipitation,soil_moisture_0_to_7cm,soil_moisture_0_to_28cm&timezone=Europe%2FParis`;
   const data = await cachedFetch(url, {}, TTL_30MIN);
-  if (!data) return [];
+  if (!data) return { precip: [], soil7cm: [], soil28cm: [] };
   const times = data?.hourly?.time ?? [];
   const precip = data?.hourly?.precipitation ?? [];
-  return times.map((t, i) => ({ t, v: precip[i] ?? 0 }));
+  const soil7cm = data?.hourly?.soil_moisture_0_to_7cm ?? [];
+  const soil28cm = data?.hourly?.soil_moisture_0_to_28cm ?? [];
+  return {
+    precip: times.map((t, i) => ({ t, v: precip[i] ?? 0 })),
+    soil7cm: times.map((t, i) => ({ t, v: soil7cm[i] ?? 0 })),
+    soil28cm: times.map((t, i) => ({ t, v: soil28cm[i] ?? 0 })),
+  };
 }
 
 function roundToHour(date) {
@@ -229,12 +235,12 @@ export async function forecast(stationId) {
     }
   }
 
-  // Fetch precipitation with future forecast
-  console.log('Fetching precipitation (past + forecast)...');
-  const precipResults = await Promise.all(
+  // Fetch meteo (precipitation + soil moisture) with future forecast
+  console.log('Fetching meteo (precip + soil moisture)...');
+  const meteoResults = await Promise.all(
     STATION_CODES.map(code => {
       const { lat, lon } = STATION_COORDS[code];
-      return fetchPrecipitation(lat, lon, inputWindow + 2, maxHorizon + 1);
+      return fetchMeteo(lat, lon, inputWindow + 2, maxHorizon + 1);
     })
   );
 
@@ -244,12 +250,20 @@ export async function forecast(stationId) {
     const code = STATION_CODES[i];
     const hArr = alignToHourlyGrid(hydroResults[i * 2], hourlyTimestamps);
     const qArr = alignToHourlyGrid(hydroResults[i * 2 + 1], hourlyTimestamps);
-    const allPrecip = alignPrecipToGrid(precipResults[i], allPrecipTimestamps);
+    const allPrecip = alignPrecipToGrid(meteoResults[i].precip, allPrecipTimestamps);
     const precipPast = allPrecip.slice(0, inputWindow);
     const precipFuture = allPrecip.slice(inputWindow, inputWindow + futureHours);
     const precipFutureDisplay = allPrecip.slice(inputWindow, inputWindow + maxHorizon);
 
-    stationData[code] = { h: hArr, q: qArr, precip: precipPast, precipFuture, precipFutureDisplay };
+    const allSoil7cm = alignPrecipToGrid(meteoResults[i].soil7cm, allPrecipTimestamps);
+    const allSoil28cm = alignPrecipToGrid(meteoResults[i].soil28cm, allPrecipTimestamps);
+    const soil7cmPast = allSoil7cm.slice(0, inputWindow);
+    const soil28cmPast = allSoil28cm.slice(0, inputWindow);
+
+    stationData[code] = {
+      h: hArr, q: qArr, precip: precipPast, precipFuture, precipFutureDisplay,
+      soil7cm: soil7cmPast, soil28cm: soil28cmPast,
+    };
   }
 
   // Compute derivatives (central) + clip
@@ -271,8 +285,8 @@ export async function forecast(stationId) {
     });
   }
 
-  // --- Build past tensor (padded: n_stations * 5 vars) ---
-  // Slot order per station: 0=h, 1=q, 2=precip, 3=dh, 4=dq/release
+  // --- Build past tensor (padded: n_stations * 7 vars) ---
+  // Slot order per station: 0=h, 1=q, 2=precip, 3=dh, 4=dq/release, 5=soil_moisture_7cm, 6=soil_moisture_28cm
   const nFeaturesPadded = nStations * VARS_PER_STATION;
   const pastTensor = new Float32Array(inputWindow * nFeaturesPadded);
 
@@ -302,6 +316,12 @@ export async function forecast(stationId) {
         pastTensor[t * nFeaturesPadded + base + 4] = normalize(sd.release?.[t] ?? 0, np_release?.min, np_release?.max);
       }
       // else no_q non-barrage (Taillis): slots 1 and 4 stay 0
+
+      // Soil moisture (slots 5 and 6)
+      const np_soil7 = normParams[`${code}_soil_moisture_0_to_7cm`];
+      const np_soil28 = normParams[`${code}_soil_moisture_0_to_28cm`];
+      pastTensor[t * nFeaturesPadded + base + 5] = normalize(sd.soil7cm[t] ?? 0, np_soil7?.min, np_soil7?.max);
+      pastTensor[t * nFeaturesPadded + base + 6] = normalize(sd.soil28cm[t] ?? 0, np_soil28?.min, np_soil28?.max);
     }
   }
 

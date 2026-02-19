@@ -64,6 +64,15 @@ def load_raw_data() -> pd.DataFrame:
             station_data[(code, "precip")] = df
             all_timestamps.update(df["timestamp"].dt.floor("h"))
 
+        for soil_var in ["soil_moisture_0_to_7cm", "soil_moisture_0_to_28cm"]:
+            soil_path = RAW_DIR / f"{code}_{soil_var}.csv"
+            if soil_path.exists():
+                df = pd.read_csv(soil_path, parse_dates=["timestamp"])
+                if df["timestamp"].dt.tz is not None:
+                    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+                station_data[(code, soil_var)] = df
+                all_timestamps.update(df["timestamp"].dt.floor("h"))
+
     if not all_timestamps:
         raise ValueError("Aucune donnée brute trouvée dans data/raw/")
 
@@ -99,6 +108,18 @@ def load_raw_data() -> pd.DataFrame:
             result = result.merge(df, on="timestamp", how="left")
         else:
             result[col_name] = np.nan
+
+        for soil_var in ["soil_moisture_0_to_7cm", "soil_moisture_0_to_28cm"]:
+            soil_key = (code, soil_var)
+            soil_col = f"{code}_{soil_var}"
+            if soil_key in station_data:
+                df = station_data[soil_key].copy()
+                df["timestamp"] = df["timestamp"].dt.floor("h")
+                df = df.groupby("timestamp")[soil_var].mean().reset_index()
+                df.columns = ["timestamp", soil_col]
+                result = result.merge(df, on="timestamp", how="left")
+            else:
+                result[soil_col] = np.nan
 
     return result
 
@@ -200,6 +221,8 @@ def build_feature_order(df: pd.DataFrame) -> list[str]:
             feature_cols.append(f"{code}_dq")
         if code in BARRAGE_CODES:
             feature_cols.append(f"{code}_release")
+        feature_cols.append(f"{code}_soil_moisture_0_to_7cm")
+        feature_cols.append(f"{code}_soil_moisture_0_to_28cm")
 
     # Vérifier que toutes les colonnes existent
     available = set(df.columns) - {"timestamp"}
